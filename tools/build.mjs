@@ -20,7 +20,8 @@ const opt = (n, d) => {
   const i = args.indexOf(n);
   return i >= 0 ? args[i + 1] : d;
 };
-const solemn = opt('--solemn', process.env.SOLEMN || 'solemn');
+let solemn = opt('--solemn', process.env.SOLEMN || 'solemn');
+if (solemn.includes('/')) solemn = path.resolve(solemn);
 const out = path.resolve(root, opt('--out', 'build/printforge'));
 fs.mkdirSync(path.join(root, 'build'), { recursive: true });
 

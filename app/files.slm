@@ -56,7 +56,7 @@ fn is_dir(path: Text) -> Bool uses fs {
 }
 
 fn is_mac() -> Bool uses env, fs {
-  return is_dir(join(home(), "Library/Application Support"))
+  return is_dir("/System/Library/CoreServices")
 }
 
 fn ensure_dir(path: Text) -> Bool uses fs, ffi {
@@ -68,7 +68,7 @@ fn ensure_dir(path: Text) -> Bool uses fs, ffi {
 }
 
 fn config_dir() -> Text uses env, fs, ffi {
-  if is_mac() {
+  if is_mac() and is_dir(join(home(), "Library/Application Support")) {
     let d: Text = join(home(), "Library/Application Support/PrintForge")
     let made: Bool = ensure_dir(d)
     return d

@@ -236,7 +236,8 @@ input.bad { border-color: var(--err) !important; animation: shake .3s; }
 .param-num { display: flex; align-items: center; gap: 8px; }
 .param-num .range { flex: 1; min-width: 0; accent-color: var(--accent); }
 .param-num .with-unit { display: flex; align-items: center; gap: 5px; width: 112px; flex: none; }
-.param.bool { flex-direction: row; align-items: center; justify-content: space-between; }
+.param.bool, .param.inline { flex-direction: row; align-items: center; justify-content: space-between; }
+.param.inline .param-num { flex: none; }
 .switch { position: relative; width: 38px; height: 22px; flex: none; }
 .switch input { opacity: 0; width: 0; height: 0; }
 .switch .slider { position: absolute; inset: 0; background: var(--line-2); border-radius: 11px; transition: .15s; cursor: pointer; }
@@ -263,7 +264,7 @@ input.bad { border-color: var(--err) !important; animation: shake .3s; }
 /* ---------- status bar ---------- */
 #statusbar { display: flex; align-items: center; gap: 14px; padding: 0 12px; background: var(--panel); border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
 #statusbar .status { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-#statusbar select { height: 22px; padding: 0 4px; line-height: 20px; border: 1px solid var(--line); border-radius: 5px; background: var(--panel-2); font-size: 12px; }
+#statusbar select { height: 24px; padding: 0 4px; line-height: normal; border: 1px solid var(--line); border-radius: 5px; background: var(--panel-2); font-size: 12px; }
 #statusbar .mode { color: var(--faint); }
 
 /* ---------- toasts ---------- */
@@ -324,9 +325,9 @@ input.bad { border-color: var(--err) !important; animation: shake .3s; }
 .fb-name { flex: 1; height: 32px; border: 1px solid var(--line-2); border-radius: 7px; padding: 0 9px; background: var(--panel); }
 .fb-name:focus { outline: none; border-color: var(--accent); }
 .help-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
-.help h3 { font-size: 13px; margin: 6px 0; }
-.help ol, .help ul { padding-left: 18px; margin: 0 0 10px; color: var(--muted); display: flex; flex-direction: column; gap: 4px; }
-.help b { color: var(--text); }
+.help-doc h3 { font-size: 13px; margin: 6px 0; }
+.help-doc ol, .help-doc ul { padding-left: 18px; margin: 0 0 10px; color: var(--muted); display: flex; flex-direction: column; gap: 4px; }
+.help-doc b { color: var(--text); }
 .keys { border-collapse: collapse; width: 100%; font-size: 12.5px; }
 .keys td { padding: 3px 4px; color: var(--muted); }
 .keys td:first-child { white-space: nowrap; width: 1%; padding-right: 12px; }
@@ -350,9 +351,41 @@ kbd { display: inline-block; min-width: 20px; padding: 1px 5px; margin-right: 3p
 #splash.failed p { color: var(--err); max-width: 420px; }
 @keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(250%); } }
 
-@media (max-width: 1180px) {
-  #main { grid-template-columns: 212px 1fr 284px; }
+#topbar { min-width: 0; overflow: hidden; }
+#topbar > * { flex-shrink: 0; }
+#topbar .docname { flex-shrink: 1; min-width: 60px; }
+#topbar .spacer { flex-shrink: 1; min-width: 4px; }
+.check-panel { width: min(360px, calc(100% - 28px)); }
+
+@media (max-width: 1320px) {
   .tool .lbl, .icon-btn.with-label .lbl { display: none; }
-  .docname { width: 120px; }
-  .chip { max-width: 170px; }
+  .tool { padding: 0 8px; }
+  .docname { width: 130px; }
+  .chip { max-width: 190px; }
+}
+@media (max-width: 1180px) {
+  #main { grid-template-columns: 200px 1fr 272px; }
+  .lib-grid { grid-template-columns: repeat(2, 1fr); }
+  .brand .word { display: none; }
+  .chip { max-width: 44px; padding: 0 12px; }
+  .chip span:last-child { display: none; }
+  .tb-group { padding-left: 6px; }
+  #topbar { gap: 6px; }
+  .row { grid-template-columns: 1fr 118px; }
+  .param-num .with-unit { width: 100px; }
+  .export .lbl { display: none; }
+  .btn.export { padding: 0 10px; }
+}
+@media (max-width: 1000px) {
+  #main { grid-template-columns: 172px 1fr 252px; }
+  .lib-grid { gap: 4px; padding: 4px 8px 8px; }
+  .tile-pic svg { width: 36px; height: 36px; }
+  .tile-name { font-size: 11px; }
+  .lib-tabs button { padding: 4px 6px; font-size: 11.5px; }
+  .insp { padding: 10px 8px; }
+  .row { grid-template-columns: 1fr 104px; gap: 6px; }
+  .docname { width: 90px; }
+  #statusbar .mode, #statusbar .count { display: none; }
+  .viewbar { top: 8px; left: 8px; }
+  .check-panel { right: 8px; bottom: 8px; }
 }

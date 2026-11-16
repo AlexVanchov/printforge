@@ -967,7 +967,7 @@ export class App {
       wide: true,
       body: h(
         'div',
-        { class: 'help' },
+        { class: 'help-doc' },
         h(
           'div',
           { class: 'help-cols' },

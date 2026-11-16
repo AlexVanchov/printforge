@@ -418,7 +418,7 @@ await test('export STL to disk', async () => {
   ok(fs.existsSync(exported), 'file exists: ' + exported);
   const stl = readStlBBox(exported);
   ok(stl.tris >= 12, 'has triangles: ' + stl.tris);
-  const r = await report();
+  const r = await freshReport();
   for (let i = 0; i < 3; i++) near(stl.dims[i], r.dims[i], 0.01, 'STL size matches print check axis ' + i);
   near(stl.min[2], 0, 0.0001, 'STL sits on z=0');
   await page.keyboard.press('Escape');

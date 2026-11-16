@@ -264,16 +264,6 @@ export class Inspector {
     }, { testid: 'scale-pct', min: 1, max: 10000, decimals: 1 });
     wrap.appendChild(this.section(h('span', { class: 'sec-title' }, 'Size', lockBtn), ...sizeRows, this.row('Scale by', pct, h('span', { class: 'unit' }, '%'))));
 
-    // position
-    const posVals = [(box.min[0] + box.max[0]) / 2, (box.min[1] + box.max[1]) / 2, box.min[2]];
-    const posRows = [0, 1, 2].map((a) => this.row(a === 2 ? 'Lift (Z)' : AXES[a] + ' center', this.lenField(posVals[a], (mm) => m.setPosition([o], a, mm), { testid: 'pos-' + a }), h('span', { class: 'unit' }, unit)));
-    wrap.appendChild(this.section('Position', ...posRows, h('div', { class: 'btns' }, btn('Drop to bed', { icon: 'drop', onclick: () => m.drop([o]), testid: 'drop' }), btn('Center', { icon: 'center', onclick: () => m.center([o]) }))));
-
-    // rotation
-    const rotRows = [0, 1, 2].map((a) => this.row('Turn ' + AXES[a], this.numField(o.rot[a], (v) => m.setRotation(o, o.rot.map((r, i) => (i === a ? v : r))), { testid: 'rot-' + a, step: 15, decimals: 2 }), h('span', { class: 'unit' }, '°')));
-    const quick = h('div', { class: 'btns three' }, ...[0, 1, 2].map((a) => btn(AXES[a] + ' 90°', { icon: 'rotate', title: 'Turn 90° around ' + AXES[a], onclick: () => m.rotateWorld([o], a, 90), testid: 'turn-' + a })));
-    wrap.appendChild(this.section('Rotation', ...rotRows, quick, btn('Lay flat (best side down)', { icon: 'wand', class: 'wide', onclick: () => this.app.autoOrient([o]), testid: 'lay-flat' })));
-
     // parameters
     if (part && part.params.length) {
       const ps = h('div', { class: 'params' });
@@ -286,6 +276,17 @@ export class Inspector {
     } else if (base.warnings && base.warnings.length) {
       wrap.appendChild(this.section('Notes', ...base.warnings.map((w) => h('div', { class: 'msg warn' }, icon('warn'), h('span', {}, w)))));
     }
+
+
+    // position
+    const posVals = [(box.min[0] + box.max[0]) / 2, (box.min[1] + box.max[1]) / 2, box.min[2]];
+    const posRows = [0, 1, 2].map((a) => this.row(a === 2 ? 'Lift (Z)' : AXES[a] + ' center', this.lenField(posVals[a], (mm) => m.setPosition([o], a, mm), { testid: 'pos-' + a }), h('span', { class: 'unit' }, unit)));
+    wrap.appendChild(this.section('Position', ...posRows, h('div', { class: 'btns' }, btn('Drop to bed', { icon: 'drop', onclick: () => m.drop([o]), testid: 'drop' }), btn('Center', { icon: 'center', onclick: () => m.center([o]) }))));
+
+    // rotation
+    const rotRows = [0, 1, 2].map((a) => this.row('Turn ' + AXES[a], this.numField(o.rot[a], (v) => m.setRotation(o, o.rot.map((r, i) => (i === a ? v : r))), { testid: 'rot-' + a, step: 15, decimals: 2 }), h('span', { class: 'unit' }, '°')));
+    const quick = h('div', { class: 'btns three' }, ...[0, 1, 2].map((a) => btn(AXES[a] + ' 90°', { icon: 'rotate', title: 'Turn 90° around ' + AXES[a], onclick: () => m.rotateWorld([o], a, 90), testid: 'turn-' + a })));
+    wrap.appendChild(this.section('Rotation', ...rotRows, quick, btn('Lay flat (best side down)', { icon: 'wand', class: 'wide', onclick: () => this.app.autoOrient([o]), testid: 'lay-flat' })));
 
     // color
     if (!o.hole) wrap.appendChild(this.section('Color', this.colorPicker([o])));
@@ -362,6 +363,7 @@ export class Inspector {
         });
       }
       ctl = h('div', { class: 'param-num' }, slider, h('div', { class: 'with-unit' }, field, suffix ? h('span', { class: 'unit' }, suffix) : null));
+      if (!slider) return h('div', { class: 'param inline ' + p.kind }, label, ctl);
     }
     return h('div', { class: 'param ' + p.kind }, label, ctl);
   }
