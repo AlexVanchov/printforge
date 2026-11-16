@@ -2,6 +2,8 @@ name: build
 
 on:
   push:
+    branches: ["**"]
+    tags: ["v*"]
   workflow_dispatch:
 
 jobs:
@@ -86,10 +88,40 @@ jobs:
           HOME=$H PRINTFORGE_SELFTEST=1 PRINTFORGE_SELFTEST_LOG=$PWD/selftest-linux.log PRINTFORGE_SELFTEST_DIR=$H/Documents timeout 180 xvfb-run -a -s "-screen 0 1600x1000x24" build/printforge
           cat selftest-linux.log
           grep -q "DONE OK" selftest-linux.log
+      - name: Linux package
+        run: |
+          V=$(node -p "require('./package.json').version")
+          mkdir -p dist/PrintForge-linux
+          cp build/printforge packaging/linux-README.txt packaging/macos/AppIcon.png THIRD_PARTY_NOTICES.md dist/PrintForge-linux/
+          tar -C dist -czf dist/PrintForge-$V-linux-x86_64.tar.gz PrintForge-linux
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: PrintForge-Linux
           path: |
-            build/printforge
+            dist/*.tar.gz
             selftest-linux.log
+
+  release:
+    name: Publish GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [macos, linux]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          V=$(node -p "require('./package.json').version")
+          [ "v$V" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME does not match package.json version $V"; exit 1; }
+          sed "s/__VERSION__/$V/g" packaging/release-notes.md > notes.md
+          gh release create "$GITHUB_REF_NAME" --title "PrintForge $V" --notes-file notes.md \
+            artifacts/PrintForge-macOS/PrintForge-$V-macOS.dmg \
+            artifacts/PrintForge-macOS/PrintForge-$V-macOS.zip \
+            artifacts/PrintForge-Linux/PrintForge-$V-linux-x86_64.tar.gz

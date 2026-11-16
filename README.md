@@ -8,7 +8,7 @@ want ("50", "2.5 cm", "1 1/2 in"), cut holes, combine parts, and export an STL
 for your slicer. While you work, a built-in **Print check** tells you, in
 plain words, whether it will print — and fixes problems with one click.
 
-![PrintForge](packaging/macos/AppIcon.png)
+![PrintForge](docs/screenshot-light.png)
 
 ## What you can do
 
@@ -43,12 +43,17 @@ plain words, whether it will print — and fixes problems with one click.
 - Projects (`.pforge`), undo/redo, copy/paste, keyboard shortcuts, autosave
   and crash recovery, light and dark mode, first-run welcome and tour.
 
-## Install on macOS
+## Download
 
-Download `PrintForge-<version>-macOS.dmg`, drag **PrintForge** to
-Applications. The first time, right-click the app → **Open** → **Open**
-(it is not from the App Store). Universal build: Apple Silicon and Intel,
-macOS 12 or newer.
+**[⬇ Get the latest release](https://github.com/AlexVanchov/printforge/releases/latest)**
+
+- **macOS 12+** (Apple Silicon and Intel): download the `.dmg`, open it and
+  drag **PrintForge** to Applications. The first time, macOS asks you to
+  confirm because the app is not from the App Store: on macOS 15+ open
+  *System Settings → Privacy & Security* and click **Open Anyway**; on older
+  versions right-click the app → **Open** → **Open**.
+- **Linux** x86_64: download the `.tar.gz`, install WebKitGTK
+  (`sudo apt install libwebkit2gtk-4.1-0`), unpack and run `./printforge`.
 
 ## Build it yourself
 
@@ -69,6 +74,11 @@ node tools/build.mjs --solemn ../solemn/target/release/solemn   # -> build/print
 build/printforge                 # desktop window
 build/printforge --serve 8765    # or use it in a browser: http://localhost:8765
 ```
+
+<p>
+  <img src="docs/screenshot-dark.png" width="49%" alt="Dark mode with part settings">
+  <img src="docs/screenshot-macos.png" width="49%" alt="PrintForge running on macOS">
+</p>
 
 ## How it is built
 
@@ -113,5 +123,5 @@ CI (`.github/workflows/build.yml`) builds the universal macOS app on a real
 Mac, launches it and runs its self-test (Apple Silicon and Intel/Rosetta),
 runs the WebKit end-to-end suite there, and verifies the signed DMG.
 
-Licenses: Solemn (Apache-2.0), three.js (MIT), Manifold (Apache-2.0), Droid
-Sans font (Apache-2.0).
+Bundled open-source components and their licenses are listed in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

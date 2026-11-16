@@ -68,7 +68,7 @@ DMGDIR=$WORK/dmg
 rm -rf "$DMGDIR" && mkdir -p "$DMGDIR"
 cp -R "$APP" "$DMGDIR/"
 ln -s /Applications "$DMGDIR/Applications"
-cp packaging/macos/README-FIRST.txt "$DMGDIR/" 2>/dev/null || true
+cp packaging/macos/README-FIRST.txt THIRD_PARTY_NOTICES.md "$DMGDIR/" 2>/dev/null || true
 hdiutil create -quiet -volname "PrintForge" -srcfolder "$DMGDIR" -ov -format UDZO "$OUT/PrintForge-$VERSION-macOS.dmg"
 ls -la "$OUT"
 echo "Done: $OUT/PrintForge.app"
