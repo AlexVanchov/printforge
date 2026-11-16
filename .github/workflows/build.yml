@@ -121,7 +121,10 @@ jobs:
           V=$(node -p "require('./package.json').version")
           [ "v$V" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME does not match package.json version $V"; exit 1; }
           sed "s/__VERSION__/$V/g" packaging/release-notes.md > notes.md
-          gh release create "$GITHUB_REF_NAME" --title "PrintForge $V" --notes-file notes.md \
-            artifacts/PrintForge-macOS/PrintForge-$V-macOS.dmg \
-            artifacts/PrintForge-macOS/PrintForge-$V-macOS.zip \
-            artifacts/PrintForge-Linux/PrintForge-$V-linux-x86_64.tar.gz
+          files=()
+          for f in "PrintForge-$V-macOS.dmg" "PrintForge-$V-macOS.zip" "PrintForge-$V-linux-x86_64.tar.gz"; do
+            p=$(find artifacts -name "$f" | head -1)
+            [ -n "$p" ] || { echo "missing $f"; exit 1; }
+            files+=("$p")
+          done
+          gh release create "$GITHUB_REF_NAME" --title "PrintForge $V" --notes-file notes.md "${files[@]}"
