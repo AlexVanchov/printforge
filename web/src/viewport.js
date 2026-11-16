@@ -222,7 +222,9 @@ export class Viewport extends EventTarget {
         mesh.matrixAutoUpdate = false;
         mesh.userData.id = o.id;
         mesh.renderOrder = d.ghost ? 2 : 0;
-        const eg = new THREE.EdgesGeometry(d.geometry, 28);
+        // feature edges (skipped for very dense meshes, where they only add noise)
+        const tris = d.geometry.getAttribute('position').count / 3;
+        const eg = tris > 120000 ? new THREE.BufferGeometry() : new THREE.EdgesGeometry(d.geometry, 28);
         const edges = new THREE.LineSegments(eg, new THREE.LineBasicMaterial({ color: 0x1e293b, transparent: true, opacity: d.ghost ? 0.5 : 0.28 }));
         edges.matrixAutoUpdate = false;
         edges.visible = this.showEdges || d.ghost;

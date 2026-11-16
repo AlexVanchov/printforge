@@ -278,7 +278,7 @@ export class App {
     this.checkT = setTimeout(() => this.runCheck(), 450);
   }
 
-  async runCheck() {
+  async runCheck(force = false) {
     const m = this.model;
     const version = m.version;
     if (!m.objects.length) {
@@ -293,6 +293,13 @@ export class App {
     }
     const pr = await m.printable();
     if (version !== m.version) return;
+    // Very detailed models: checking blocks the window for a moment, so it
+    // runs when asked instead of after every edit.
+    if (!force && pr.soup.length / 9 > 150000) {
+      this.report = { manual: true, tris: pr.soup.length / 9 };
+      this.renderCheck();
+      return;
+    }
     // 0.01 mm is plenty for print-readiness maths and keeps the payload small
     const tri = Array.from(pr.soup, (v) => Math.round(v * 100) / 100);
     if (!native() && tri.length * 7 > 950000) {
@@ -318,6 +325,12 @@ export class App {
       score.textContent = '–';
       sum.textContent = r && r.onlyHoles ? 'Only holes so far — add a solid' : 'Add a shape to begin';
       body.replaceChildren(h('p', { class: 'note pad' }, 'As you design, PrintForge checks that your model fits your printer, sits flat on the bed, and needs as little support as possible.'));
+      return;
+    }
+    if (r.manual) {
+      score.textContent = '?';
+      sum.textContent = 'Detailed model — check on demand';
+      body.replaceChildren(h('p', { class: 'note pad' }, 'This model has ' + Math.round(r.tris).toLocaleString() + ' triangles, so PrintForge checks it when you ask.'), btn('Check now', { icon: 'ok', class: 'primary wide', onclick: () => this.runCheck(true), testid: 'check-now' }));
       return;
     }
     if (r.failed) {
@@ -760,7 +773,7 @@ export class App {
       },
     });
     const r = this.report;
-    const summary = r && !r.empty && !r.tooBig && !r.failed ? h('div', { class: 'export-summary' }, h('span', { class: 'score ' + (r.score >= 90 ? 'good' : r.score >= 60 ? 'meh' : 'bad') }, r.score), h('div', {}, h('b', {}, r.checks.some((c) => c.level === 'error') ? 'Some problems need fixing first' : 'Looks printable'), h('p', {}, fmtDims(r.dims, m.settings.units) + ' · ≈ ' + r.time_text + ' · ' + fmtNum(r.grams, 1) + ' g'))) : null;
+    const summary = r && !r.empty && !r.tooBig && !r.failed && !r.manual ? h('div', { class: 'export-summary' }, h('span', { class: 'score ' + (r.score >= 90 ? 'good' : r.score >= 60 ? 'meh' : 'bad') }, r.score), h('div', {}, h('b', {}, r.checks.some((c) => c.level === 'error') ? 'Some problems need fixing first' : 'Looks printable'), h('p', {}, fmtDims(r.dims, m.settings.units) + ' · ≈ ' + r.time_text + ' · ' + fmtNum(r.grams, 1) + ' g'))) : null;
     const body = h('div', { class: 'form' }, summary, h('label', {}, 'File name', nameIn), h('label', {}, 'Format', fmt), h('label', {}, 'What to export', what), h('div', { class: 'folder-row' }, h('span', { class: 'lbl' }, 'Folder'), dirEl, changeDir));
     const md = modal({
       title: 'Export for your slicer',
@@ -838,7 +851,7 @@ export class App {
     mt.addEventListener('change', showNote);
     showNote();
     const infill = h('input', { type: 'number', min: 0, max: 100, step: 5, value: s.infill });
-    const layer = h('select', {}, ...[0.08, 0.12, 0.16, 0.2, 0.24, 0.28].map((v) => h('option', { value: v, selected: Math.abs(v - s.layer) < 1e-6 }, v + ' mm' + (v === 0.2 ? ' (standard)' : v < 0.16 ? ' (fine)' : v > 0.2 ? ' (fast)' : ''))));
+    const layer = h('select', {}, ...[0.08, 0.12, 0.16, 0.2, 0.24, 0.28].map((v) => h('option', { value: v, selected: Math.abs(v - s.layer) < 1e-6 }, v + ' mm' + (v < 0.16 ? ' fine' : v > 0.2 ? ' fast' : ''))));
     const walls = h('input', { type: 'number', min: 1, max: 8, step: 1, value: s.walls });
     const units = h('select', {}, h('option', { value: 'mm', selected: s.units === 'mm' }, 'Millimetres (mm)'), h('option', { value: 'in', selected: s.units === 'in' }, 'Inches (in)'));
     modal({

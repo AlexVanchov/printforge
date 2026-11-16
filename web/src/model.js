@@ -321,10 +321,17 @@ export class Model extends EventTarget {
     this.worldCache = new Map();
     // apply Solemn-resolved values (clamped/defaulted) back to params
     for (const o of this.objects) {
+      const oldKey = this.baseKey(o);
       const b = await this.base(o);
       if (b.values && JSON.stringify(sortKeys(b.values)) !== JSON.stringify(sortKeys(o.params))) {
         o.params = b.values;
-        this.bases.set(this.baseKey(o), Promise.resolve(b));
+        const newKey = this.baseKey(o);
+        // MOVE the entry (never alias one manifold under two keys: pruning
+        // one key would free geometry the other still points to)
+        if (!this.bases.has(newKey) && this.bases.get(oldKey)) {
+          this.bases.set(newKey, this.bases.get(oldKey));
+          this.bases.delete(oldKey);
+        }
       }
     }
     for (const o of this.objects) {
@@ -427,8 +434,10 @@ export class Model extends EventTarget {
     this.pruneBases();
   }
 
+  // Free geometry no object uses any more (slider drags create many
+  // variants; each lives in the WASM heap).
   pruneBases() {
-    if (this.bases.size < 400) return;
+    if (this.bases.size < 60) return;
     const live = new Set();
     const walk = (o) => {
       live.add(this.baseKey(o));
