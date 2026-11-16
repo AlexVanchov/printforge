@@ -1,0 +1,1160 @@
+# parts — the PrintForge shape library.
+#
+# Every shape a user can add — a plain box or a ready-made functional part
+# like a storage box, wall hook or gear — is defined here once: its friendly
+# parameters (with units, limits and help text), which parameters set the
+# printed width/depth/height (so typing an exact size changes the right
+# parameter and wall thicknesses stay exact), and a recipe that turns the
+# parameters into a csg tree. Functional parts are designed to print without
+# supports in the orientation they are created in (horizontal screw holes are
+# teardrops, overhangs stay under 45 degrees).
+#
+# The examples pin the important promise: the default part really has the
+# advertised size.
+
+import "csg.slm"
+import "fmath.slm"
+import "jsonx.slm"
+
+type Param = { key: Text, label: Text, kind: Text, dflt: Float, dtext: Text, lo: Float, hi: Float, step: Float, help: Text, choices: List[Text] }
+
+type Part = { id: Text, name: Text, cat: Text, desc: Text, params: List[Param], bx: Text, by: Text, bz: Text, tip: Text }
+
+type Built = { tree: Json, warnings: List[Text], info: List[Text] }
+
+# ---- parameter constructors ----------------------------------------------
+
+fn pmm(key: Text, label: Text, d: Float, lo: Float, hi: Float, step: Float, help: Text) -> Param {
+  let none: List[Text] = []
+  return Param { key: key, label: label, kind: "mm", dflt: d, dtext: "", lo: lo, hi: hi, step: step, help: help, choices: none }
+}
+
+fn pdeg(key: Text, label: Text, d: Float, lo: Float, hi: Float, help: Text) -> Param {
+  let none: List[Text] = []
+  return Param { key: key, label: label, kind: "deg", dflt: d, dtext: "", lo: lo, hi: hi, step: 1.0, help: help, choices: none }
+}
+
+fn pcount(key: Text, label: Text, d: Float, lo: Float, hi: Float, help: Text) -> Param {
+  let none: List[Text] = []
+  return Param { key: key, label: label, kind: "count", dflt: d, dtext: "", lo: lo, hi: hi, step: 1.0, help: help, choices: none }
+}
+
+fn ppct(key: Text, label: Text, d: Float, lo: Float, hi: Float, help: Text) -> Param {
+  let none: List[Text] = []
+  return Param { key: key, label: label, kind: "pct", dflt: d, dtext: "", lo: lo, hi: hi, step: 1.0, help: help, choices: none }
+}
+
+fn ptext(key: Text, label: Text, d: Text, help: Text) -> Param {
+  let none: List[Text] = []
+  return Param { key: key, label: label, kind: "text", dflt: 0.0, dtext: d, lo: 0.0, hi: 0.0, step: 0.0, help: help, choices: none }
+}
+
+fn pbool(key: Text, label: Text, d: Bool, help: Text) -> Param {
+  let none: List[Text] = []
+  var v: Float = 0.0
+  if d {
+    v = 1.0
+  }
+  return Param { key: key, label: label, kind: "bool", dflt: v, dtext: "", lo: 0.0, hi: 1.0, step: 1.0, help: help, choices: none }
+}
+
+fn pchoice(key: Text, label: Text, choices: List[Text], d: Text, help: Text) -> Param {
+  return Param { key: key, label: label, kind: "choice", dflt: 0.0, dtext: d, lo: 0.0, hi: 0.0, step: 0.0, help: help, choices: choices }
+}
+
+fn screw_choices() -> List[Text] {
+  return ["M3", "M4", "M5", "M6", "#6", "#8", "#10"]
+}
+
+fn pscrew(d: Text) -> Param {
+  return pchoice("screw", "Screw size", screw_choices(), d, "The screws you will use. Holes get the right clearance automatically.")
+}
+
+# Clearance-hole diameter for a screw (fits through freely).
+fn screw_clear(s: Text) -> Float {
+  example screw_clear("M3") == 3.4
+  example screw_clear("#8") == 4.6
+  example screw_clear("weird") == 4.5
+
+  if s == "M2" {
+    return 2.4
+  }
+  if s == "M2.5" {
+    return 2.9
+  }
+  if s == "M3" {
+    return 3.4
+  }
+  if s == "M5" {
+    return 5.5
+  }
+  if s == "M6" {
+    return 6.6
+  }
+  if s == "M8" {
+    return 9.0
+  }
+  if s == "#6" {
+    return 3.9
+  }
+  if s == "#8" {
+    return 4.6
+  }
+  if s == "#10" {
+    return 5.3
+  }
+  return 4.5
+}
+
+# Countersunk head diameter (90 degree flat heads), with a little room.
+fn screw_head(s: Text) -> Float {
+  example screw_head("M3") == 6.6
+  example screw_head("M4") == 8.8
+
+  if s == "M2" {
+    return 4.4
+  }
+  if s == "M2.5" {
+    return 5.5
+  }
+  if s == "M3" {
+    return 6.6
+  }
+  if s == "M5" {
+    return 10.8
+  }
+  if s == "M6" {
+    return 12.8
+  }
+  if s == "M8" {
+    return 16.8
+  }
+  if s == "#6" {
+    return 7.8
+  }
+  if s == "#8" {
+    return 9.0
+  }
+  if s == "#10" {
+    return 10.2
+  }
+  return 8.8
+}
+
+# Pilot hole a screw can thread itself into printed plastic.
+fn screw_pilot(s: Text) -> Float {
+  example screw_pilot("M4") == 3.4
+
+  if s == "M3" {
+    return 2.6
+  }
+  if s == "M5" {
+    return 4.3
+  }
+  if s == "M6" {
+    return 5.1
+  }
+  if s == "#6" {
+    return 2.9
+  }
+  if s == "#8" {
+    return 3.4
+  }
+  if s == "#10" {
+    return 4.0
+  }
+  return 3.4
+}
+
+# ---- the catalog ----------------------------------------------------------
+
+fn part(id: Text, name: Text, cat: Text, desc: Text, params: List[Param], bx: Text, by: Text, bz: Text, tip: Text) -> Part {
+  return Part { id: id, name: name, cat: cat, desc: desc, params: params, bx: bx, by: by, bz: bz, tip: tip }
+}
+
+fn basic_parts() -> List[Part] {
+  example len(basic_parts()) == 13
+
+  let corner: Param = pmm("radius", "Corner rounding", 0.0, 0.0, 50.0, 0.5, "Rounds the vertical edges. 0 = sharp corners.")
+  let box_p: Part = part("box", "Box", "basic", "A block. Make it any size.", [pmm("width", "Width", 20.0, 0.4, 1000.0, 1.0, "Size from left to right."), pmm("depth", "Depth", 20.0, 0.4, 1000.0, 1.0, "Size from front to back."), pmm("height", "Height", 20.0, 0.2, 1000.0, 1.0, "Size from bottom to top."), corner], "width", "depth", "height", "")
+  let cyl_p: Part = part("cylinder", "Cylinder", "basic", "A round post or disc.", [pmm("diameter", "Diameter", 20.0, 0.4, 1000.0, 1.0, "Distance across the circle."), pmm("height", "Height", 20.0, 0.2, 1000.0, 1.0, "Size from bottom to top."), pcount("sides", "Sides", 0.0, 0.0, 128.0, "0 makes it perfectly round. 6 makes a hexagon, and so on.")], "diameter", "diameter", "height", "")
+  let sph_p: Part = part("sphere", "Sphere", "basic", "A ball.", [pmm("diameter", "Diameter", 20.0, 0.4, 1000.0, 1.0, "Distance across the ball.")], "diameter", "diameter", "diameter", "Balls touch the bed at a single point. Cut the bottom flat (add a hole box) or use supports.")
+  let cone_p: Part = part("cone", "Cone", "basic", "A cone or a truncated cone.", [pmm("bottom", "Bottom diameter", 20.0, 0.0, 1000.0, 1.0, "Width at the bottom."), pmm("top", "Top diameter", 0.0, 0.0, 1000.0, 1.0, "Width at the top. 0 makes a sharp tip."), pmm("height", "Height", 20.0, 0.2, 1000.0, 1.0, "Size from bottom to top.")], "bottom", "bottom", "height", "")
+  let pyr_p: Part = part("pyramid", "Pyramid", "basic", "A pyramid with 3 to 12 sides.", [pmm("base", "Base width", 20.0, 0.4, 1000.0, 1.0, "Width of the base."), pmm("height", "Height", 20.0, 0.2, 1000.0, 1.0, "Size from bottom to the tip."), pcount("sides", "Sides", 4.0, 3.0, 12.0, "Number of sides of the base.")], "base", "base", "height", "")
+  let tor_p: Part = part("torus", "Ring", "basic", "A donut-shaped ring.", [pmm("diameter", "Outer diameter", 30.0, 2.0, 1000.0, 1.0, "Width across the whole ring."), pmm("thickness", "Thickness", 6.0, 0.4, 500.0, 0.5, "How thick the ring itself is.")], "diameter", "diameter", "thickness", "Rings touch the bed with a thin line. Supports or a brim help.")
+  let tube_p: Part = part("tube", "Tube", "basic", "A hollow cylinder (pipe, sleeve, bushing).", [pmm("diameter", "Outer diameter", 20.0, 1.0, 1000.0, 1.0, "Width across the outside."), pmm("wall", "Wall thickness", 2.0, 0.4, 100.0, 0.2, "How thick the wall is."), pmm("height", "Height", 20.0, 0.2, 1000.0, 1.0, "Size from bottom to top.")], "diameter", "diameter", "height", "")
+  let wedge_p: Part = part("wedge", "Wedge", "basic", "A ramp with a right angle.", [pmm("width", "Width", 20.0, 0.4, 1000.0, 1.0, "Length of the slope along the bed."), pmm("depth", "Depth", 20.0, 0.4, 1000.0, 1.0, "Size from front to back."), pmm("height", "Height", 20.0, 0.2, 1000.0, 1.0, "Height of the tall side.")], "width", "depth", "height", "")
+  let dome_p: Part = part("dome", "Dome", "basic", "Half a sphere with a flat bottom.", [pmm("diameter", "Diameter", 20.0, 0.4, 1000.0, 1.0, "Width of the round base.")], "diameter", "diameter", "", "")
+  let prism_p: Part = part("prism", "Polygon", "basic", "A prism with 3 to 12 straight sides (hexagon by default).", [pcount("sides", "Sides", 6.0, 3.0, 12.0, "Number of sides."), pmm("diameter", "Corner-to-corner width", 20.0, 0.4, 1000.0, 1.0, "Distance between opposite corners."), pmm("height", "Height", 10.0, 0.2, 1000.0, 1.0, "Size from bottom to top.")], "", "", "height", "")
+  let star_p: Part = part("star", "Star", "basic", "A flat star.", [pcount("points", "Points", 5.0, 3.0, 20.0, "Number of points."), pmm("diameter", "Diameter", 40.0, 2.0, 1000.0, 1.0, "Width across the tips."), ppct("inner", "Inner size", 45.0, 10.0, 90.0, "How deep the notches between the points are."), pmm("height", "Height", 5.0, 0.2, 500.0, 0.5, "Thickness of the star.")], "", "", "height", "")
+  let heart_p: Part = part("heart", "Heart", "basic", "A flat heart.", [pmm("width", "Width", 40.0, 2.0, 1000.0, 1.0, "Width of the heart."), pmm("height", "Height", 5.0, 0.2, 500.0, 0.5, "Thickness of the heart.")], "width", "", "height", "")
+  let text_p: Part = part("text", "Text", "basic", "3D letters.", [ptext("text", "Text", "Hello", "The words to print."), pmm("size", "Letter height", 10.0, 2.0, 500.0, 0.5, "Height of capital letters. Below 5 mm details get fuzzy."), pmm("depth", "Thickness", 3.0, 0.4, 200.0, 0.5, "How thick the letters are.")], "", "", "depth", "Letters print best lying flat on the bed.")
+  return [box_p, cyl_p, sph_p, cone_p, pyr_p, tor_p, tube_p, wedge_p, dome_p, prism_p, star_p, heart_p, text_p]
+}
+
+fn functional_parts() -> List[Part] {
+  example len(functional_parts()) == 12
+
+  let sbox: Part = part("storage_box", "Storage Box", "functional", "An open box or tray with optional dividers and a lift-off lid.", [pmm("width", "Width", 80.0, 15.0, 400.0, 1.0, "Outside width."), pmm("depth", "Depth", 60.0, 15.0, 400.0, 1.0, "Outside depth."), pmm("height", "Height", 40.0, 5.0, 400.0, 1.0, "Outside height."), pmm("wall", "Wall thickness", 1.6, 0.8, 10.0, 0.2, "1.2 to 2 mm is plenty for most boxes."), pmm("floor", "Floor thickness", 1.6, 0.6, 10.0, 0.2, "Thickness of the bottom."), pmm("radius", "Corner rounding", 4.0, 0.0, 40.0, 0.5, "Rounded corners look nicer and are easier to clean."), pcount("div_x", "Dividers (left-right)", 0.0, 0.0, 12.0, "Walls that split the box into columns."), pcount("div_y", "Dividers (front-back)", 0.0, 0.0, 12.0, "Walls that split the box into rows."), pbool("lid", "Lift-off lid", false, "Adds a matching lid next to the box."), pmm("clearance", "Lid clearance", 0.3, 0.1, 1.0, 0.05, "Gap that makes the lid slide on. Increase if it is too tight.")], "width", "depth", "height", "Prints as shown, no supports needed.")
+  let hook: Part = part("wall_hook", "Wall Hook", "functional", "A strong screw-on hook for coats, bags, tools or cables.", [pmm("width", "Hook width", 20.0, 8.0, 100.0, 1.0, "How wide the hook is."), pmm("plate", "Back plate height", 60.0, 25.0, 200.0, 1.0, "Height of the part that touches the wall."), pmm("reach", "Reach", 35.0, 10.0, 150.0, 1.0, "How far the hook sticks out from the wall."), pmm("lip", "Tip height", 15.0, 4.0, 100.0, 1.0, "Height of the upturned tip that stops things sliding off."), pmm("thickness", "Thickness", 5.0, 2.0, 20.0, 0.5, "Thicker is stronger. 5 mm holds a heavy coat."), pscrew("M4"), pbool("countersink", "Countersunk holes", true, "Flat-head screws sit flush.")], "reach", "plate", "width", "Printed lying on its side so the layers run along the hook: much stronger.")
+  let bracket: Part = part("shelf_bracket", "Shelf Bracket", "functional", "An L bracket with a brace, for small shelves.", [pmm("arm_wall", "Wall arm length", 80.0, 30.0, 250.0, 1.0, "Length of the arm screwed to the wall."), pmm("arm_shelf", "Shelf arm length", 80.0, 30.0, 250.0, 1.0, "Length of the arm under the shelf."), pmm("width", "Width", 20.0, 8.0, 80.0, 1.0, "How wide the bracket is."), pmm("thickness", "Thickness", 5.0, 3.0, 20.0, 0.5, "Thickness of the arms."), pbool("brace", "Diagonal brace", true, "A triangular brace for much more strength."), pcount("holes", "Holes per arm", 2.0, 1.0, 4.0, "Number of screw holes in each arm."), pscrew("M4"), pbool("countersink", "Countersunk holes", true, "Flat-head screws sit flush.")], "arm_shelf", "arm_wall", "width", "Printed on its side for strength, no supports needed.")
+  let clip: Part = part("cable_clip", "Cable Clip", "functional", "Holds a cable or tube against a wall or desk.", [pmm("cable", "Cable diameter", 6.0, 2.0, 40.0, 0.5, "Measure your cable. A little extra room is added for you."), pmm("width", "Clip width", 10.0, 4.0, 60.0, 1.0, "Length along the cable."), pmm("wall", "Wall thickness", 2.0, 1.0, 6.0, 0.2, "Thicker clips grip harder."), pchoice("mount", "Mounting", ["Screw tab", "Flat base (tape)"], "Screw tab", "Screw it on, or stick it on with double-sided tape."), pscrew("M3")], "", "", "width", "")
+  let spacer: Part = part("spacer", "Spacer / Washer", "functional", "A round spacer or washer for a screw.", [pmm("outer", "Outer diameter", 12.0, 3.0, 200.0, 0.5, "Width across the outside."), pchoice("screw", "Screw size", ["M2", "M2.5", "M3", "M4", "M5", "M6", "M8", "#6", "#8", "#10", "Custom"], "M3", "The hole fits this screw. Choose Custom to type the hole size."), pmm("inner", "Custom hole diameter", 3.4, 0.5, 190.0, 0.1, "Only used when the screw size is Custom."), pmm("height", "Height", 5.0, 0.4, 200.0, 0.5, "Length of the spacer.")], "outer", "outer", "height", "")
+  let stand: Part = part("phone_stand", "Phone Stand", "functional", "A sturdy stand for a phone or tablet.", [pdeg("angle", "Viewing angle", 65.0, 45.0, 85.0, "How upright the device stands. 90 would be vertical."), pmm("slot", "Device thickness", 12.0, 5.0, 30.0, 0.5, "Thickness of your device including its case. Add 1 mm."), pmm("height", "Back height", 80.0, 30.0, 200.0, 1.0, "Height of the back support. Use 120+ for tablets."), pmm("lip", "Front lip height", 12.0, 4.0, 40.0, 1.0, "Lower lips leave room for the charging port."), pmm("width", "Width", 70.0, 30.0, 250.0, 1.0, "How wide the stand is."), pmm("thickness", "Thickness", 5.0, 3.0, 12.0, 0.5, "Thickness of base, lip and back.")], "", "width", "height", "Prints on its side, no supports needed.")
+  let gear: Part = part("gear", "Gear", "functional", "A spur gear with real involute teeth.", [pcount("teeth", "Teeth", 20.0, 6.0, 150.0, "Number of teeth. Gears that mesh share the same tooth size."), pmm("module", "Tooth size (module)", 2.0, 0.5, 8.0, 0.25, "Gears only mesh with the same module. 1 to 2 prints well."), pmm("thickness", "Thickness", 6.0, 1.0, 100.0, 0.5, "Thickness of the gear."), pmm("bore", "Center hole", 5.0, 0.0, 200.0, 0.1, "Hole for the shaft. 0 for no hole."), pmm("hub", "Hub height", 0.0, 0.0, 50.0, 0.5, "Extra collar around the hole, on top. 0 for none."), pdeg("pressure", "Pressure angle", 20.0, 14.5, 25.0, "20 is standard. Gears that mesh must match."), pmm("backlash", "Backlash", 0.1, 0.0, 0.5, 0.05, "Play between teeth so printed gears do not bind.")], "module", "module", "thickness", "")
+  let knob: Part = part("knob", "Knob", "functional", "A grippy knob for a shaft (potentiometer, valve, lamp...).", [pmm("diameter", "Diameter", 30.0, 8.0, 150.0, 1.0, "Width of the knob."), pmm("height", "Height", 15.0, 5.0, 100.0, 1.0, "Height of the knob."), pcount("ridges", "Grip ridges", 18.0, 0.0, 60.0, "Notches around the edge for grip. 0 for smooth."), pmm("shaft", "Shaft diameter", 6.0, 1.0, 30.0, 0.1, "Diameter of the shaft it sits on."), pchoice("shaft_type", "Shaft shape", ["Round", "D-shaft"], "D-shaft", "D-shafts have one flat side."), pmm("shaft_depth", "Hole depth", 10.0, 2.0, 90.0, 0.5, "How deep the shaft goes in.")], "diameter", "diameter", "height", "Printed upside down (top on the bed) so the hole needs no support.")
+  let tagp: Part = part("name_tag", "Name Tag / Keychain", "functional", "A tag with your text and an optional key-ring hole.", [ptext("text", "Text", "PrintForge", "The words on the tag."), pmm("size", "Letter height", 10.0, 4.0, 60.0, 0.5, "Height of capital letters."), pmm("plate", "Plate thickness", 2.4, 1.0, 10.0, 0.2, "Thickness of the tag."), pmm("raise", "Letter thickness", 1.2, 0.4, 10.0, 0.2, "How far letters stand out (or how deep they are cut)."), pmm("padding", "Border", 4.0, 1.0, 20.0, 0.5, "Space around the text."), pmm("radius", "Corner rounding", 3.0, 0.0, 30.0, 0.5, "Rounded corners."), pbool("hole", "Key-ring hole", true, "Adds a hole for a key ring or lanyard."), pchoice("style", "Style", ["Raised letters", "Cut-out letters"], "Raised letters", "Raised letters can be printed in a second color by pausing the print.")], "", "size", "", "")
+  let pot: Part = part("plant_pot", "Plant Pot", "functional", "A tapered pot with drainage holes and an optional saucer.", [pmm("top", "Top diameter", 90.0, 20.0, 300.0, 1.0, "Width at the rim."), pmm("bottom", "Bottom diameter", 70.0, 15.0, 300.0, 1.0, "Width at the base."), pmm("height", "Height", 80.0, 15.0, 300.0, 1.0, "Height of the pot."), pmm("wall", "Wall thickness", 2.0, 0.8, 8.0, 0.2, "Thickness of the sides."), pmm("floor", "Floor thickness", 3.0, 1.0, 10.0, 0.5, "Thickness of the bottom."), pcount("holes", "Drainage holes", 5.0, 0.0, 13.0, "Holes in the floor so water can drain."), pbool("saucer", "Saucer", false, "Adds a matching saucer next to the pot.")], "top", "top", "height", "")
+  let plate: Part = part("mount_plate", "Mounting Plate", "functional", "A flat plate with a grid of screw holes.", [pmm("width", "Width", 60.0, 10.0, 400.0, 1.0, "Width of the plate."), pmm("depth", "Depth", 40.0, 10.0, 400.0, 1.0, "Depth of the plate."), pmm("thickness", "Thickness", 4.0, 1.0, 30.0, 0.5, "Thickness of the plate."), pcount("holes_x", "Holes across", 2.0, 0.0, 10.0, "Number of holes from left to right."), pcount("holes_y", "Holes deep", 2.0, 0.0, 10.0, "Number of holes from front to back."), pmm("margin", "Hole distance from edge", 6.0, 2.0, 50.0, 0.5, "Distance from the edge to the hole centers."), pscrew("M4"), pbool("countersink", "Countersunk holes", true, "Flat-head screws sit flush."), pmm("radius", "Corner rounding", 4.0, 0.0, 40.0, 0.5, "Rounded corners.")], "width", "depth", "thickness", "")
+  let handle: Part = part("drawer_handle", "Drawer Handle", "functional", "A bar handle for drawers and doors.", [pmm("spacing", "Screw spacing", 96.0, 20.0, 400.0, 1.0, "Center-to-center distance of the screws (96 and 128 mm are common)."), pmm("clearance", "Finger room", 25.0, 10.0, 60.0, 1.0, "Gap between the door and the bar."), pmm("grip", "Bar thickness", 10.0, 5.0, 30.0, 0.5, "Thickness of the bar you hold."), pmm("width", "Width", 12.0, 6.0, 40.0, 0.5, "Width of the handle."), pchoice("screw", "Screw size", ["M3", "M4", "M5", "#6", "#8"], "M4", "Machine screws thread into the posts.")], "", "clearance", "width", "Printed on its side, no supports needed.")
+  return [sbox, hook, bracket, clip, spacer, stand, gear, knob, tagp, pot, plate, handle]
+}
+
+fn all_parts() -> List[Part] {
+  example len(all_parts()) == 25
+
+  var out: List[Part] = basic_parts()
+  for fp in functional_parts() {
+    out = push(out, fp)
+  }
+  return out
+}
+
+fn find(id: Text) -> Option[Part] {
+  example find("nope") == None
+
+  for pt in all_parts() {
+    if pt.id == id {
+      return Some(pt)
+    }
+  }
+  return None
+}
+
+# ---- parameter values -----------------------------------------------------
+
+fn param_json(pm: Param) -> Json {
+  var j: Json = jsonx.obj()
+  j = jsonx.putt(j, "key", pm.key)
+  j = jsonx.putt(j, "label", pm.label)
+  j = jsonx.putt(j, "kind", pm.kind)
+  j = jsonx.putt(j, "help", pm.help)
+  if pm.kind == "text" or pm.kind == "choice" {
+    j = jsonx.putt(j, "default", pm.dtext)
+  } else if pm.kind == "bool" {
+    j = jsonx.putb(j, "default", pm.dflt > 0.5)
+  } else {
+    j = jsonx.putn(j, "default", pm.dflt)
+    j = jsonx.putn(j, "min", pm.lo)
+    j = jsonx.putn(j, "max", pm.hi)
+    j = jsonx.putn(j, "step", pm.step)
+  }
+  if pm.kind == "choice" {
+    j = jsonx.put(j, "choices", jsonx.texts(pm.choices))
+  }
+  return j
+}
+
+fn part_json(pt: Part) -> Json {
+  var ps: List[Json] = []
+  for pm in pt.params {
+    ps = push(ps, param_json(pm))
+  }
+  var j: Json = jsonx.obj()
+  j = jsonx.putt(j, "id", pt.id)
+  j = jsonx.putt(j, "name", pt.name)
+  j = jsonx.putt(j, "cat", pt.cat)
+  j = jsonx.putt(j, "desc", pt.desc)
+  j = jsonx.putt(j, "tip", pt.tip)
+  j = jsonx.put(j, "params", JList(ps))
+  j = jsonx.put(j, "bind", jsonx.texts([pt.bx, pt.by, pt.bz]))
+  return j
+}
+
+fn catalog_json() -> Json {
+  example len(jsonx.items(catalog_json(), "parts")) == 25
+
+  var ps: List[Json] = []
+  for pt in all_parts() {
+    ps = push(ps, part_json(pt))
+  }
+  return jsonx.put(jsonx.obj(), "parts", JList(ps))
+}
+
+fn has_choice(choices: List[Text], t: Text) -> Bool {
+  for c in choices {
+    if c == t {
+      return true
+    }
+  }
+  return false
+}
+
+# Fill in defaults, clamp numbers into range, round counts, validate choices:
+# whatever the page sends, recipes only ever see sane values.
+fn resolve(pt: Part, vals: Json) -> Json {
+  var out: Json = jsonx.obj()
+  for pm in pt.params {
+    if pm.kind == "text" {
+      let tv: Text = jsonx.text(vals, pm.key, pm.dtext)
+      if len(tv) > 60 {
+        out = jsonx.putt(out, pm.key, pm.dtext)
+      } else {
+        out = jsonx.putt(out, pm.key, tv)
+      }
+    } else if pm.kind == "choice" {
+      let cv: Text = jsonx.text(vals, pm.key, pm.dtext)
+      if has_choice(pm.choices, cv) {
+        out = jsonx.putt(out, pm.key, cv)
+      } else {
+        out = jsonx.putt(out, pm.key, pm.dtext)
+      }
+    } else if pm.kind == "bool" {
+      out = jsonx.putb(out, pm.key, jsonx.boolean(vals, pm.key, pm.dflt > 0.5))
+    } else {
+      var x: Float = fmath.clampf(jsonx.num(vals, pm.key, pm.dflt), pm.lo, pm.hi)
+      if pm.kind == "count" {
+        x = fmath.roundf(x)
+      }
+      out = jsonx.putn(out, pm.key, x)
+    }
+  }
+  out = jsonx.putn(out, "_nozzle", fmath.clampf(jsonx.num(vals, "_nozzle", 0.4), 0.1, 2.0))
+  return out
+}
+
+fn defaults(id: Text) -> Json {
+  match find(id) {
+    Some(pt) -> {
+      return resolve(pt, jsonx.obj())
+    }
+    None -> {
+      return jsonx.obj()
+    }
+  }
+}
+
+fn n(v: Json, k: Text) -> Float {
+  return jsonx.num(v, k, 0.0)
+}
+
+fn ni(v: Json, k: Text) -> Int {
+  return fmath.round_int(jsonx.num(v, k, 0.0))
+}
+
+fn tx(v: Json, k: Text) -> Text {
+  return jsonx.text(v, k, "")
+}
+
+fn bl(v: Json, k: Text) -> Bool {
+  return jsonx.boolean(v, k, false)
+}
+
+fn built(tree: Json) -> Built {
+  let none: List[Text] = []
+  return Built { tree: tree, warnings: none, info: none }
+}
+
+fn warn(b: Built, w: Text) -> Built {
+  return Built { tree: b.tree, warnings: push(b.warnings, w), info: b.info }
+}
+
+fn note(b: Built, i: Text) -> Built {
+  return Built { tree: b.tree, warnings: b.warnings, info: push(b.info, i) }
+}
+
+fn wall_check(b: Built, wall: Float, nozzle: Float, what: Text) -> Built {
+  if wall < nozzle * 2.0 {
+    return warn(b, what + " is " + fmath.fmt(wall, 2) + " mm, thinner than two lines of your " + fmath.fmt(nozzle, 2) + " mm nozzle. It may print with gaps or break. Use at least " + fmath.fmt(nozzle * 2.0, 2) + " mm.")
+  }
+  return b
+}
+
+# ---- helpers shared by recipes -------------------------------------------
+
+# A horizontal hole along +X from x=0 to x=length whose top is a 45 degree
+# point (a "teardrop"), so it prints cleanly without support.
+fn teardrop_x(r: Float, length: Float) -> Json {
+  let main: Json = csg.rot(csg.cyl(r, length), 0.0, 90.0, 0.0)
+  let tip: Json = csg.at(csg.rot(csg.cyl(0.05, length), 0.0, 90.0, 0.0), 0.0, 0.0, r * 1.414)
+  return csg.hull([main, tip])
+}
+
+# The same along +Y from y=0 to y=length.
+fn teardrop_y(r: Float, length: Float) -> Json {
+  let main: Json = csg.rot(csg.cyl(r, length), -90.0, 0.0, 0.0)
+  let tip: Json = csg.at(csg.rot(csg.cyl(0.05, length), -90.0, 0.0, 0.0), 0.0, 0.0, r * 1.414)
+  return csg.hull([main, tip])
+}
+
+# A 90 degree countersink cone along +X ending (wide end) at x=0.
+fn sink_x(r: Float, head: Float) -> Json {
+  let depth: Float = fmath.maxf(head / 2.0 - r, 0.1)
+  let cone: Json = csg.rot(csg.cone(r, head / 2.0, depth), 0.0, 90.0, 0.0)
+  let cap: Json = csg.at(csg.rot(csg.cyl(head / 2.0, 3.0), 0.0, 90.0, 0.0), depth, 0.0, 0.0)
+  return csg.at(csg.union([cone, cap]), 0.0 - depth, 0.0, 0.0)
+}
+
+fn sink_y(r: Float, head: Float) -> Json {
+  let depth: Float = fmath.maxf(head / 2.0 - r, 0.1)
+  let cone: Json = csg.rot(csg.cone(r, head / 2.0, depth), -90.0, 0.0, 0.0)
+  let cap: Json = csg.at(csg.rot(csg.cyl(head / 2.0, 3.0), -90.0, 0.0, 0.0), 0.0, depth, 0.0)
+  return csg.at(csg.union([cone, cap]), 0.0, 0.0 - depth, 0.0)
+}
+
+fn rect_pts(x0: Float, y0: Float, x1: Float, y1: Float) -> List[Json] {
+  return [csg.pt(x0, y0), csg.pt(x1, y0), csg.pt(x1, y1), csg.pt(x0, y1)]
+}
+
+fn rounded_rect_pts(x0: Float, y0: Float, x1: Float, y1: Float, r: Float) -> List[Json] {
+  let rr: Float = fmath.clampf(r, 0.0, fmath.minf(x1 - x0, y1 - y0) / 2.0 - 0.01)
+  if rr <= 0.05 {
+    return rect_pts(x0, y0, x1, y1)
+  }
+  var pts: List[Json] = []
+  let cx: List[Float] = [x1 - rr, x0 + rr, x0 + rr, x1 - rr]
+  let cy: List[Float] = [y0 + rr, y1 - rr, y1 - rr, y0 + rr]
+  # corners in CCW order: bottom-right, top-right, top-left, bottom-left
+  let cxs: List[Float] = [x1 - rr, x1 - rr, x0 + rr, x0 + rr]
+  let cys: List[Float] = [y0 + rr, y1 - rr, y1 - rr, y0 + rr]
+  var c: Int = 0
+  while c < 4 {
+    let ccx: Float = fl(cxs, c)
+    let ccy: Float = fl(cys, c)
+    let start: Float = -90.0 + 90.0 * to_float(c)
+    var k: Int = 0
+    while k <= 6 {
+      let a: Float = fmath.deg2rad(start + 15.0 * to_float(k))
+      pts = push(pts, csg.pt(ccx + rr * fmath.cosf(a), ccy + rr * fmath.sinf(a)))
+      k = k + 1
+    }
+    c = c + 1
+  }
+  return pts
+}
+
+fn fl(xs: List[Float], i: Int) -> Float {
+  match get(xs, i) {
+    Some(v) -> {
+      return v
+    }
+    None -> {
+      return 0.0
+    }
+  }
+}
+
+# ---- basic shapes -----------------------------------------------------------
+
+fn build_basic(id: Text, v: Json) -> Built {
+  if id == "box" {
+    let w: Float = n(v, "width")
+    let d: Float = n(v, "depth")
+    let h: Float = n(v, "height")
+    return built(csg.at(csg.rbox(w, d, h, n(v, "radius")), 0.0 - w / 2.0, 0.0 - d / 2.0, 0.0))
+  }
+  if id == "cylinder" {
+    let sides: Int = ni(v, "sides")
+    let r: Float = n(v, "diameter") / 2.0
+    if sides >= 3 {
+      return built(csg.ngon(r, r, n(v, "height"), sides))
+    }
+    return built(csg.cyl(r, n(v, "height")))
+  }
+  if id == "sphere" {
+    return built(csg.sphere(n(v, "diameter") / 2.0))
+  }
+  if id == "cone" {
+    let b: Float = n(v, "bottom")
+    let t: Float = n(v, "top")
+    let h2: Float = n(v, "height")
+    var cb: Built = built(csg.cone(b / 2.0, t / 2.0, h2))
+    if b <= 0.0 and t <= 0.0 {
+      cb = built(csg.cone(5.0, 0.0, h2))
+      cb = warn(cb, "A cone needs a top or bottom diameter. Showing a 10 mm cone.")
+    }
+    if t > b and fmath.rad2deg(fmath.atan2f((t - b) / 2.0, h2)) > 45.0 {
+      cb = warn(cb, "The cone gets wider toward the top at more than 45 degrees, so it will need supports. Tip: rotate it upside down.")
+    }
+    return cb
+  }
+  if id == "pyramid" {
+    let sides2: Int = ni(v, "sides")
+    let base: Float = n(v, "base")
+    if sides2 == 4 {
+      return built(csg.poly_taper(rect_pts(0.0 - base / 2.0, 0.0 - base / 2.0, base / 2.0, base / 2.0), n(v, "height"), 0.0))
+    }
+    return built(csg.poly_taper(regular_pts(sides2, base / 2.0), n(v, "height"), 0.0))
+  }
+  if id == "torus" {
+    let od: Float = n(v, "diameter")
+    let th: Float = fmath.minf(n(v, "thickness"), od / 2.0 - 0.2)
+    var tb: Built = built(csg.torus((od - th) / 2.0, th / 2.0))
+    if th < n(v, "thickness") {
+      tb = warn(tb, "The ring was too thick for its diameter, so the thickness was reduced to " + fmath.fmt(th, 2) + " mm.")
+    }
+    return tb
+  }
+  if id == "tube" {
+    let od2: Float = n(v, "diameter")
+    let wall: Float = fmath.minf(n(v, "wall"), od2 / 2.0 - 0.2)
+    let ht: Float = n(v, "height")
+    let tube: Json = csg.diff(csg.cyl(od2 / 2.0, ht), [csg.at(csg.cyl(od2 / 2.0 - wall, ht + 2.0), 0.0, 0.0, -1.0)])
+    return wall_check(built(tube), wall, n(v, "_nozzle"), "The wall")
+  }
+  if id == "wedge" {
+    let ww: Float = n(v, "width")
+    let wh: Float = n(v, "height")
+    let prof: Json = csg.poly([csg.pt(0.0, 0.0), csg.pt(ww, 0.0), csg.pt(0.0, wh)], n(v, "depth"))
+    return built(csg.rot(prof, 90.0, 0.0, 0.0))
+  }
+  if id == "dome" {
+    let rd: Float = n(v, "diameter") / 2.0
+    return built(csg.inter([csg.sphere(rd), csg.at(csg.box(2.0 * rd + 2.0, 2.0 * rd + 2.0, rd + 1.0), 0.0 - rd - 1.0, 0.0 - rd - 1.0, 0.0)]))
+  }
+  if id == "prism" {
+    let rp: Float = n(v, "diameter") / 2.0
+    return built(csg.ngon(rp, rp, n(v, "height"), ni(v, "sides")))
+  }
+  if id == "star" {
+    return built(csg.poly(star_pts(ni(v, "points"), n(v, "diameter") / 2.0, n(v, "diameter") / 2.0 * n(v, "inner") / 100.0), n(v, "height")))
+  }
+  if id == "heart" {
+    return built(csg.poly(heart_pts(n(v, "width")), n(v, "height")))
+  }
+  if id == "text" {
+    var txb: Built = built(csg.text3d(tx(v, "text"), n(v, "size"), n(v, "depth")))
+    if n(v, "size") < 5.0 {
+      txb = warn(txb, "Letters smaller than 5 mm lose detail on most printers.")
+    }
+    if tx(v, "text") == "" {
+      txb = warn(txb, "Type some text to see the letters.")
+    }
+    return txb
+  }
+  return built(csg.box(10.0, 10.0, 10.0))
+}
+
+# A regular polygon with a flat bottom edge, counter-clockwise.
+fn regular_pts(sides: Int, r: Float) -> List[Json] {
+  example len(regular_pts(6, 10.0)) == 6
+
+  var pts: List[Json] = []
+  var i: Int = 0
+  while i < sides {
+    let a: Float = fmath.deg2rad(-90.0 + 180.0 / to_float(sides) + 360.0 * to_float(i) / to_float(sides))
+    pts = push(pts, csg.pt(r * fmath.cosf(a), r * fmath.sinf(a)))
+    i = i + 1
+  }
+  return pts
+}
+
+fn star_pts(points: Int, ro: Float, ri: Float) -> List[Json] {
+  example len(star_pts(5, 10.0, 4.0)) == 10
+
+  var pts: List[Json] = []
+  var i: Int = 0
+  while i < points * 2 {
+    let a: Float = fmath.deg2rad(90.0 + 180.0 * to_float(i) / to_float(points))
+    var r: Float = ro
+    if i % 2 == 1 {
+      r = ri
+    }
+    pts = push(pts, csg.pt(r * fmath.cosf(a), r * fmath.sinf(a)))
+    i = i + 1
+  }
+  return pts
+}
+
+# The classic heart curve, scaled to `width`, counter-clockwise.
+fn heart_pts(width: Float) -> List[Json] {
+  example len(heart_pts(40.0)) == 72
+
+  let s: Float = width / 32.0
+  var pts: List[Json] = []
+  var i: Int = 0
+  while i < 72 {
+    let t: Float = 0.0 - fmath.deg2rad(5.0 * to_float(i))
+    let st: Float = fmath.sinf(t)
+    let x: Float = 16.0 * st * st * st
+    let y: Float = 13.0 * fmath.cosf(t) - 5.0 * fmath.cosf(2.0 * t) - 2.0 * fmath.cosf(3.0 * t) - fmath.cosf(4.0 * t)
+    pts = push(pts, csg.pt(x * s, y * s))
+    i = i + 1
+  }
+  return pts
+}
+
+# ---- functional parts ---------------------------------------------------------
+
+fn build_storage_box(v: Json) -> Built {
+  let w: Float = n(v, "width")
+  let d: Float = n(v, "depth")
+  let h: Float = n(v, "height")
+  let fl0: Float = fmath.minf(n(v, "floor"), h - 1.0)
+  let t: Float = fmath.minf(n(v, "wall"), fmath.minf(w, d) / 2.0 - 2.0)
+  let r: Float = n(v, "radius")
+  let iw: Float = w - 2.0 * t
+  let idp: Float = d - 2.0 * t
+  let outer: Json = csg.rbox(w, d, h, r)
+  let inner: Json = csg.at(csg.rbox(iw, idp, h, fmath.maxf(r - t, 0.0)), t, t, fl0)
+  var parts: List[Json] = [csg.diff(outer, [inner])]
+  let nx: Int = ni(v, "div_x")
+  var i: Int = 1
+  while i <= nx {
+    let x: Float = t + iw * to_float(i) / to_float(nx + 1) - t / 2.0
+    parts = push(parts, csg.at(csg.box(t, d - t, h - fl0), x, t / 2.0, fl0 - 0.01))
+    i = i + 1
+  }
+  let ny: Int = ni(v, "div_y")
+  var j: Int = 1
+  while j <= ny {
+    let y: Float = t + idp * to_float(j) / to_float(ny + 1) - t / 2.0
+    parts = push(parts, csg.at(csg.box(w - t, t, h - fl0), t / 2.0, y, fl0 - 0.01))
+    j = j + 1
+  }
+  if bl(v, "lid") {
+    let c: Float = n(v, "clearance")
+    let lw: Float = iw - 2.0 * c
+    let ld: Float = idp - 2.0 * c
+    let lip_r: Float = fmath.maxf(r - t - c, 0.0)
+    let lid_plate: Json = csg.rbox(w, d, fl0, r)
+    let lip: Json = csg.diff(csg.rbox(lw, ld, 4.0, lip_r), [csg.at(csg.rbox(lw - 2.0 * t, ld - 2.0 * t, 6.0, fmath.maxf(lip_r - t, 0.0)), t, t, -1.0)])
+    let lid: Json = csg.union([lid_plate, csg.at(lip, t + c, t + c, fl0 - 0.01)])
+    parts = push(parts, csg.at(lid, w + 10.0, 0.0, 0.0))
+  }
+  var b: Built = built(csg.union(parts))
+  b = wall_check(b, t, n(v, "_nozzle"), "The wall")
+  b = wall_check(b, fl0, n(v, "_nozzle") / 2.0, "The floor")
+  b = note(b, "Inside space: " + fmath.fmt(iw, 1) + " x " + fmath.fmt(idp, 1) + " x " + fmath.fmt(h - fl0, 1) + " mm.")
+  if bl(v, "lid") {
+    b = note(b, "The lid is printed upside down next to the box. If it is too tight, raise the lid clearance.")
+  }
+  return b
+}
+
+fn build_wall_hook(v: Json) -> Built {
+  let w: Float = n(v, "width")
+  let hp: Float = n(v, "plate")
+  let reach: Float = n(v, "reach")
+  let lip: Float = n(v, "lip")
+  let t: Float = fmath.minf(n(v, "thickness"), fmath.minf(reach / 2.0, lip))
+  let g: Float = fmath.minf(reach - 2.0 * t, hp - t) * 0.35
+  var profile: List[Json] = [csg.poly(rect_pts(0.0, 0.0, t, hp), w), csg.poly(rect_pts(0.0, 0.0, reach, t), w), csg.poly(rect_pts(reach - t, 0.0, reach, fmath.maxf(lip, t)), w)]
+  if g > 1.0 {
+    profile = push(profile, csg.poly([csg.pt(t - 0.01, t - 0.01), csg.pt(t + g, t - 0.01), csg.pt(t - 0.01, t + g)], w))
+  }
+  let body: Json = csg.union(profile)
+  let s: Text = tx(v, "screw")
+  let hr: Float = screw_clear(s) / 2.0
+  let y1: Float = t + (hp - t) * 0.45
+  let y2: Float = hp - fmath.maxf(screw_head(s) / 2.0 + 3.0, (hp - t) * 0.12)
+  var cuts: List[Json] = []
+  for y in [y1, y2] {
+    cuts = push(cuts, csg.at(teardrop_x(hr, t + 2.0), -1.0, y, w / 2.0))
+    if bl(v, "countersink") {
+      cuts = push(cuts, csg.at(sink_x(hr, screw_head(s)), t, y, w / 2.0))
+    }
+  }
+  var b: Built = built(csg.diff(body, cuts))
+  if w < screw_head(s) + 4.0 {
+    b = warn(b, "The hook is narrow for " + s + " screw heads. Make it at least " + fmath.fmt(screw_head(s) + 4.0, 0) + " mm wide.")
+  }
+  if t < 3.0 {
+    b = warn(b, "Hooks thinner than 3 mm can snap under load.")
+  }
+  b = note(b, "Rough capacity in PLA: " + fmath.fmt(t * t * w / 6.0, 0) + " N-cm bending. 5 mm thick holds a heavy coat.")
+  return b
+}
+
+fn build_shelf_bracket(v: Json) -> Built {
+  let a: Float = n(v, "arm_wall")
+  let bb: Float = n(v, "arm_shelf")
+  let w: Float = n(v, "width")
+  let t: Float = n(v, "thickness")
+  var profile: List[Json] = [csg.poly(rect_pts(0.0, 0.0, t, a), w), csg.poly(rect_pts(0.0, 0.0, bb, t), w)]
+  let ga: Float = (a - t) * 0.45
+  let gb: Float = (bb - t) * 0.45
+  if bl(v, "brace") {
+    profile = push(profile, csg.poly([csg.pt(t - 0.01, t - 0.01), csg.pt(t + gb, t - 0.01), csg.pt(t - 0.01, t + ga)], w))
+  }
+  let body: Json = csg.union(profile)
+  let s: Text = tx(v, "screw")
+  let hr: Float = screw_clear(s) / 2.0
+  let holes: Int = ni(v, "holes")
+  var cuts: List[Json] = []
+  var i: Int = 0
+  while i < holes {
+    var f: Float = 0.75
+    if holes > 1 {
+      f = 0.55 + 0.37 * to_float(i) / to_float(holes - 1)
+    }
+    let yw: Float = t + (a - t) * f
+    let xs: Float = t + (bb - t) * f
+    cuts = push(cuts, csg.at(teardrop_x(hr, t + 2.0), -1.0, yw, w / 2.0))
+    cuts = push(cuts, csg.at(teardrop_y(hr, t + 2.0), xs, -1.0, w / 2.0))
+    if bl(v, "countersink") {
+      cuts = push(cuts, csg.at(sink_x(hr, screw_head(s)), t, yw, w / 2.0))
+      cuts = push(cuts, csg.at(csg.rot(sink_y(hr, screw_head(s)), 0.0, 0.0, 180.0), xs, 0.0, w / 2.0))
+    }
+    i = i + 1
+  }
+  var b: Built = built(csg.diff(body, cuts))
+  if not bl(v, "brace") {
+    b = warn(b, "Without the brace the bracket bends easily. Only use it for light loads.")
+  }
+  if w < screw_head(s) + 4.0 {
+    b = warn(b, "The bracket is narrow for " + s + " screw heads. Make it at least " + fmath.fmt(screw_head(s) + 4.0, 0) + " mm wide.")
+  }
+  return b
+}
+
+fn build_cable_clip(v: Json) -> Built {
+  let cd: Float = n(v, "cable") + 0.4
+  let w: Float = n(v, "width")
+  let t: Float = n(v, "wall")
+  let ro: Float = cd / 2.0 + t
+  let ring: Json = csg.cyl(ro, w)
+  let s: Text = tx(v, "screw")
+  let head: Float = screw_head(s)
+  var solids: List[Json] = [ring]
+  let tab_len: Float = head + 2.0 * t
+  if tx(v, "mount") == "Screw tab" {
+    solids = push(solids, csg.at(csg.box(ro + tab_len, t, w), 0.0, 0.0 - ro, 0.0))
+  } else {
+    solids = push(solids, csg.at(csg.box(2.0 * ro, t, w), 0.0 - ro, 0.0 - ro, 0.0))
+  }
+  let gap: Float = cd * 0.7
+  var cuts: List[Json] = [csg.at(csg.cyl(cd / 2.0, w + 2.0), 0.0, 0.0, -1.0), csg.at(csg.box(gap, ro + 1.0, w + 2.0), 0.0 - gap / 2.0, 0.0, -1.0)]
+  if tx(v, "mount") == "Screw tab" {
+    let hx: Float = ro + tab_len / 2.0
+    cuts = push(cuts, csg.at(teardrop_y(screw_clear(s) / 2.0, t + 2.0), hx, 0.0 - ro - 1.0, w / 2.0))
+  }
+  var b: Built = built(csg.diff(csg.union(solids), cuts))
+  b = note(b, "Snaps onto cables up to " + fmath.fmt(n(v, "cable"), 1) + " mm. The opening is " + fmath.fmt(gap, 1) + " mm wide.")
+  if tx(v, "mount") == "Screw tab" and w < head + 2.0 {
+    b = warn(b, "The clip is narrower than the screw head. Make it at least " + fmath.fmt(head + 2.0, 0) + " mm wide.")
+  }
+  return b
+}
+
+fn build_spacer(v: Json) -> Built {
+  let od: Float = n(v, "outer")
+  var hole: Float = n(v, "inner")
+  if tx(v, "screw") != "Custom" {
+    hole = screw_clear(tx(v, "screw"))
+  }
+  let h: Float = n(v, "height")
+  if hole >= od - 0.8 {
+    var bad: Built = built(csg.cyl(od / 2.0, h))
+    bad = warn(bad, "The hole (" + fmath.fmt(hole, 1) + " mm) is too big for the outer diameter. Increase the outer diameter.")
+    return bad
+  }
+  var b: Built = built(csg.diff(csg.cyl(od / 2.0, h), [csg.at(csg.cyl(hole / 2.0, h + 2.0), 0.0, 0.0, -1.0)]))
+  b = wall_check(b, (od - hole) / 2.0, n(v, "_nozzle"), "The wall")
+  b = note(b, "Hole: " + fmath.fmt(hole, 2) + " mm.")
+  return b
+}
+
+fn build_phone_stand(v: Json) -> Built {
+  let a: Float = fmath.deg2rad(n(v, "angle"))
+  let s: Float = n(v, "slot")
+  let h: Float = n(v, "height")
+  let lip: Float = n(v, "lip")
+  let w: Float = n(v, "width")
+  let t: Float = n(v, "thickness")
+  let x1: Float = t + s
+  let xt: Float = x1 + h / fmath.tanf(a)
+  let back: Float = xt + t * 1.5
+  let support: Json = csg.poly([csg.pt(x1, t - 0.01), csg.pt(back, t - 0.01), csg.pt(back, t + h), csg.pt(xt, t + h)], w)
+  let base: Json = csg.poly(rect_pts(0.0, 0.0, back, t), w)
+  let front: Json = csg.poly(rect_pts(0.0, 0.0, t, t + lip), w)
+  let profile: Json = csg.union([support, base, front])
+  var b: Built = built(csg.rot(profile, 90.0, 0.0, 0.0))
+  if n(v, "angle") > 78.0 {
+    b = warn(b, "At angles above 78 degrees the device may tip forward when you tap it.")
+  }
+  if back < h * 0.45 {
+    b = warn(b, "The base is short for this height and may tip backward. Lower the back or the angle.")
+  }
+  b = note(b, "Fits devices up to " + fmath.fmt(s, 1) + " mm thick.")
+  return b
+}
+
+fn inv(a: Float) -> Float {
+  example near0(inv(0.0))
+
+  return fmath.tanf(a) - a
+}
+
+fn near0(x: Float) -> Bool {
+  return fmath.absf(x) < 0.000000001
+}
+
+fn polar(r: Float, ang: Float) -> Json {
+  return csg.pt(r * fmath.cosf(ang), r * fmath.sinf(ang))
+}
+
+# Counter-clockwise outline of an involute spur gear.
+fn gear_pts(z: Int, m: Float, pa_deg: Float, backlash: Float) -> List[Json] {
+  requires z >= 3 and m > 0.0
+  example len(gear_pts(20, 2.0, 20.0, 0.0)) == 20 * 19
+
+  let pa: Float = fmath.deg2rad(pa_deg)
+  let rp: Float = m * to_float(z) / 2.0
+  let rb: Float = rp * fmath.cosf(pa)
+  let ra: Float = rp + m
+  let rf: Float = fmath.maxf(rp - 1.25 * m, 0.5)
+  let half: Float = fmath.pi() / (2.0 * to_float(z)) - backlash / (2.0 * rp)
+  let base_psi: Float = half + inv(pa)
+  let r0: Float = fmath.maxf(rf, rb)
+  let steps: Int = 7
+  var pts: List[Json] = []
+  var i: Int = 0
+  while i < z {
+    let c: Float = 2.0 * fmath.pi() * to_float(i) / to_float(z)
+    pts = push(pts, polar(rf, c - fmath.pi() / to_float(z)))
+    if rf < rb {
+      pts = push(pts, polar(rf, c - base_psi))
+    } else {
+      pts = push(pts, polar(rf, c - psi(rf, rb, base_psi)))
+    }
+    var k: Int = 0
+    while k <= steps {
+      let r: Float = r0 + (ra - r0) * to_float(k) / to_float(steps)
+      pts = push(pts, polar(r, c - psi(r, rb, base_psi)))
+      k = k + 1
+    }
+    pts = push(pts, polar(ra, c))
+    var k2: Int = steps
+    while k2 >= 0 {
+      let r2: Float = r0 + (ra - r0) * to_float(k2) / to_float(steps)
+      pts = push(pts, polar(r2, c + psi(r2, rb, base_psi)))
+      k2 = k2 - 1
+    }
+    i = i + 1
+  }
+  return pts
+}
+
+# Half tooth angle at radius r (never negative: pointed tips are clipped).
+fn psi(r: Float, rb: Float, base_psi: Float) -> Float {
+  if r <= rb {
+    return base_psi
+  }
+  let p: Float = base_psi - inv(fmath.acosf(rb / r))
+  return fmath.maxf(p, 0.002)
+}
+
+fn build_gear(v: Json) -> Built {
+  let z: Int = ni(v, "teeth")
+  let m: Float = n(v, "module")
+  let t: Float = n(v, "thickness")
+  let rp: Float = m * to_float(z) / 2.0
+  let rf: Float = rp - 1.25 * m
+  let bore: Float = fmath.minf(n(v, "bore"), fmath.maxf(rf * 2.0 - 2.0, 0.0))
+  let hub: Float = n(v, "hub")
+  var solids: List[Json] = [csg.poly(gear_pts(z, m, n(v, "pressure"), n(v, "backlash")), t)]
+  let hub_r: Float = fmath.minf(fmath.maxf(bore * 0.9 + 2.0, bore / 2.0 + 3.0), rf - 0.5)
+  if hub > 0.0 and hub_r > bore / 2.0 {
+    solids = push(solids, csg.at(csg.cyl(hub_r, hub + 0.01), 0.0, 0.0, t - 0.01))
+  }
+  var g: Json = csg.union(solids)
+  if bore > 0.2 {
+    g = csg.diff(g, [csg.at(csg.cyl(bore / 2.0, t + hub + 2.0), 0.0, 0.0, -1.0)])
+  }
+  var b: Built = built(g)
+  b = note(b, "Pitch diameter " + fmath.fmt(2.0 * rp, 2) + " mm, outside diameter " + fmath.fmt(2.0 * rp + 2.0 * m, 2) + " mm.")
+  b = note(b, "To mesh with another gear of module " + fmath.fmt(m, 2) + ": center distance = (" + to_text(z) + " + other teeth) x " + fmath.fmt(m / 2.0, 3) + " mm.")
+  if z < 12 {
+    b = warn(b, "Gears with fewer than 12 teeth have weak, undercut teeth.")
+  }
+  if m < 0.8 {
+    b = warn(b, "Teeth this small need a fine nozzle (0.25 mm) to print accurately.")
+  }
+  if bore < n(v, "bore") {
+    b = warn(b, "The center hole was reduced to " + fmath.fmt(bore, 1) + " mm so the teeth stay attached.")
+  }
+  return b
+}
+
+fn build_knob(v: Json) -> Built {
+  let dk: Float = n(v, "diameter")
+  let h: Float = n(v, "height")
+  let r: Float = dk / 2.0
+  let c: Float = fmath.minf(1.0, h / 5.0)
+  let body: Json = csg.union([csg.cone(r - c, r, c), csg.at(csg.cyl(r, h - c + 0.01), 0.0, 0.0, c - 0.01)])
+  var cuts: List[Json] = []
+  let ridges: Int = ni(v, "ridges")
+  if ridges > 0 {
+    let rr: Float = fmath.minf(fmath.pi() * r / to_float(ridges) * 0.42, r * 0.2)
+    var i: Int = 0
+    while i < ridges {
+      let a: Float = 2.0 * fmath.pi() * to_float(i) / to_float(ridges)
+      cuts = push(cuts, csg.at(csg.cyl(rr, h + 2.0), (r + rr * 0.35) * fmath.cosf(a), (r + rr * 0.35) * fmath.sinf(a), -1.0))
+      i = i + 1
+    }
+  }
+  let sd: Float = fmath.minf(n(v, "shaft"), dk - 4.0) + 0.2
+  let depth: Float = fmath.minf(n(v, "shaft_depth"), h - 1.2)
+  var shaft: Json = csg.cyl(sd / 2.0, depth + 1.0)
+  if tx(v, "shaft_type") == "D-shaft" {
+    let flat: Float = sd / 2.0 - sd * 0.15
+    shaft = csg.inter([shaft, csg.at(csg.box(sd + 2.0, sd + 2.0, depth + 3.0), 0.0 - sd / 2.0 - 1.0 - (sd / 2.0 - flat), 0.0 - sd / 2.0 - 1.0, -1.0)])
+  }
+  cuts = push(cuts, csg.at(shaft, 0.0, 0.0, h - depth))
+  var b: Built = built(csg.diff(body, cuts))
+  if depth < n(v, "shaft_depth") {
+    b = warn(b, "The hole was made shallower (" + fmath.fmt(depth, 1) + " mm) to keep a solid top.")
+  }
+  return b
+}
+
+fn build_name_tag(v: Json) -> Built {
+  let txt: Text = tx(v, "text")
+  let size: Float = n(v, "size")
+  let plate: Float = n(v, "plate")
+  let raise: Float = n(v, "raise")
+  var hole: Float = 0.0
+  if bl(v, "hole") {
+    hole = fmath.maxf(4.0, size * 0.45)
+  }
+  let base: Json = csg.tag(txt, size, n(v, "padding"), n(v, "radius"), plate, hole)
+  var b: Built = built(base)
+  if txt == "" {
+    b = warn(b, "Type some text for the tag.")
+    return b
+  }
+  if tx(v, "style") == "Cut-out letters" {
+    let cut_depth: Float = fmath.minf(raise, plate - 0.6)
+    b = built(csg.diff(base, [csg.at(csg.text3d(txt, size, cut_depth + 1.0), 0.0, 0.0, plate - cut_depth)]))
+    if cut_depth < raise {
+      b = warn(b, "Letters were cut only " + fmath.fmt(cut_depth, 1) + " mm deep so the tag keeps a solid back.")
+    }
+  } else {
+    b = built(csg.union([base, csg.at(csg.text3d(txt, size, raise + 0.01), 0.0, 0.0, plate - 0.01)]))
+    b = note(b, "For two colors, pause the print at " + fmath.fmt(plate, 1) + " mm height and swap filament.")
+  }
+  if size < 6.0 {
+    b = warn(b, "Letters smaller than 6 mm lose detail. Use a bold, short text.")
+  }
+  return b
+}
+
+fn build_plant_pot(v: Json) -> Built {
+  let top: Float = n(v, "top")
+  let bot: Float = n(v, "bottom")
+  let h: Float = n(v, "height")
+  let wall: Float = n(v, "wall")
+  let fl0: Float = n(v, "floor")
+  let slope: Float = (top - bot) / 2.0 / h
+  let rf: Float = bot / 2.0 + slope * fl0 - wall
+  let rt: Float = top / 2.0 + slope - wall
+  let outer: Json = csg.cone(bot / 2.0, top / 2.0, h)
+  var cuts: List[Json] = [csg.at(csg.cone(rf, rt, h - fl0 + 1.0), 0.0, 0.0, fl0)]
+  let holes: Int = ni(v, "holes")
+  let hd: Float = fmath.clampf(bot / 12.0, 4.0, 8.0)
+  if holes >= 1 {
+    cuts = push(cuts, csg.at(csg.cyl(hd / 2.0, fl0 + 2.0), 0.0, 0.0, -1.0))
+  }
+  var i: Int = 0
+  while i < holes - 1 {
+    let a: Float = 2.0 * fmath.pi() * to_float(i) / to_float(holes - 1)
+    let rr: Float = rf * 0.6
+    cuts = push(cuts, csg.at(csg.cyl(hd / 2.0, fl0 + 2.0), rr * fmath.cosf(a), rr * fmath.sinf(a), -1.0))
+    i = i + 1
+  }
+  var solids: List[Json] = [csg.diff(outer, cuts)]
+  if bl(v, "saucer") {
+    let sd: Float = bot + 16.0
+    let saucer: Json = csg.diff(csg.cone(sd / 2.0, sd / 2.0 + 4.0, 12.0), [csg.at(csg.cone(sd / 2.0 - 2.0, sd / 2.0 + 2.0, 12.0), 0.0, 0.0, 2.0)])
+    solids = push(solids, csg.at(saucer, top / 2.0 + sd / 2.0 + 12.0, 0.0, 0.0))
+  }
+  var b: Built = built(csg.union(solids))
+  b = wall_check(b, wall, n(v, "_nozzle"), "The wall")
+  if fmath.rad2deg(fmath.atan2f(fmath.absf(top - bot) / 2.0, h)) > 45.0 {
+    b = warn(b, "The sides lean more than 45 degrees and may sag. Make the pot taller or the top narrower.")
+  }
+  if top < bot {
+    b = warn(b, "The pot is wider at the bottom than the top. It will print, but plants are hard to remove.")
+  }
+  return b
+}
+
+fn build_mount_plate(v: Json) -> Built {
+  let w: Float = n(v, "width")
+  let d: Float = n(v, "depth")
+  let t: Float = n(v, "thickness")
+  let mg: Float = n(v, "margin")
+  let s: Text = tx(v, "screw")
+  let hr: Float = screw_clear(s) / 2.0
+  let nx: Int = ni(v, "holes_x")
+  let ny: Int = ni(v, "holes_y")
+  let base: Json = csg.at(csg.rbox(w, d, t, n(v, "radius")), 0.0 - w / 2.0, 0.0 - d / 2.0, 0.0)
+  var cuts: List[Json] = []
+  var i: Int = 0
+  while i < nx {
+    var x: Float = 0.0
+    if nx > 1 {
+      x = 0.0 - w / 2.0 + mg + (w - 2.0 * mg) * to_float(i) / to_float(nx - 1)
+    }
+    var j: Int = 0
+    while j < ny {
+      var y: Float = 0.0
+      if ny > 1 {
+        y = 0.0 - d / 2.0 + mg + (d - 2.0 * mg) * to_float(j) / to_float(ny - 1)
+      }
+      cuts = push(cuts, csg.at(csg.cyl(hr, t + 2.0), x, y, -1.0))
+      if bl(v, "countersink") {
+        let depth: Float = fmath.minf(screw_head(s) / 2.0 - hr, t - 0.6)
+        cuts = push(cuts, csg.at(csg.cone(screw_head(s) / 2.0 - depth, screw_head(s) / 2.0, depth + 0.01), x, y, t - depth))
+        cuts = push(cuts, csg.at(csg.cyl(screw_head(s) / 2.0, 2.0), x, y, t))
+      }
+      j = j + 1
+    }
+    i = i + 1
+  }
+  var b: Built = built(csg.diff(base, cuts))
+  if mg < screw_head(s) / 2.0 + 1.0 and nx * ny > 0 {
+    b = warn(b, "Holes are very close to the edge. Use a margin of at least " + fmath.fmt(screw_head(s) / 2.0 + 1.0, 1) + " mm.")
+  }
+  if bl(v, "countersink") and t < screw_head(s) / 2.0 - hr + 0.6 {
+    b = warn(b, "The plate is too thin for fully countersunk " + s + " screws. The heads will stick out a little.")
+  }
+  return b
+}
+
+fn build_drawer_handle(v: Json) -> Built {
+  let sp: Float = n(v, "spacing")
+  let cl: Float = n(v, "clearance")
+  let g: Float = n(v, "grip")
+  let w: Float = n(v, "width")
+  let post: Float = fmath.maxf(g, screw_pilot(tx(v, "screw")) + 4.0)
+  let half: Float = sp / 2.0
+  let bar: Json = csg.poly(rounded_rect_pts(0.0 - half - post / 2.0, cl, half + post / 2.0, cl + g, g / 2.0 - 0.1), w)
+  let p1: Json = csg.poly(rect_pts(0.0 - half - post / 2.0, 0.0, 0.0 - half + post / 2.0, cl + g / 2.0), w)
+  let p2: Json = csg.poly(rect_pts(half - post / 2.0, 0.0, half + post / 2.0, cl + g / 2.0), w)
+  let pr: Float = screw_pilot(tx(v, "screw")) / 2.0
+  let depth: Float = fmath.minf(cl + g / 2.0, 16.0)
+  let cuts: List[Json] = [csg.at(teardrop_y(pr, depth + 1.0), 0.0 - half, -1.0, w / 2.0), csg.at(teardrop_y(pr, depth + 1.0), half, -1.0, w / 2.0)]
+  var b: Built = built(csg.diff(csg.union([bar, p1, p2]), cuts))
+  b = note(b, "Screw holes are " + fmath.fmt(depth, 0) + " mm deep pilot holes: the screws cut their own thread.")
+  if w < pr * 2.0 + 4.0 {
+    b = warn(b, "The handle is too narrow around the screw holes.")
+  }
+  return b
+}
+
+fn build_functional(id: Text, v: Json) -> Built {
+  if id == "storage_box" {
+    return build_storage_box(v)
+  }
+  if id == "wall_hook" {
+    return build_wall_hook(v)
+  }
+  if id == "shelf_bracket" {
+    return build_shelf_bracket(v)
+  }
+  if id == "cable_clip" {
+    return build_cable_clip(v)
+  }
+  if id == "spacer" {
+    return build_spacer(v)
+  }
+  if id == "phone_stand" {
+    return build_phone_stand(v)
+  }
+  if id == "gear" {
+    return build_gear(v)
+  }
+  if id == "knob" {
+    return build_knob(v)
+  }
+  if id == "name_tag" {
+    return build_name_tag(v)
+  }
+  if id == "plant_pot" {
+    return build_plant_pot(v)
+  }
+  if id == "mount_plate" {
+    return build_mount_plate(v)
+  }
+  if id == "drawer_handle" {
+    return build_drawer_handle(v)
+  }
+  return build_basic(id, v)
+}
+
+# Build any part from (possibly partial or malformed) values.
+fn build(id: Text, vals: Json) -> Result[Built, Text] {
+  example dims_of("box") == [20.0, 20.0, 20.0]
+  example dims_of("cylinder") == [20.0, 20.0, 20.0]
+  example dims_of("tube") == [20.0, 20.0, 20.0]
+  example dims_of("wedge") == [20.0, 20.0, 20.0]
+  example dims_of("dome") == [20.0, 20.0, 10.0]
+  example dims_of("torus") == [30.0, 30.0, 6.0]
+  example dims_of("pyramid") == [20.0, 20.0, 20.0]
+  example dims_of("storage_box") == [80.0, 60.0, 40.0]
+  example dims_of("spacer") == [12.0, 12.0, 5.0]
+  example dims_of("mount_plate") == [60.0, 40.0, 4.0]
+  example dims_of("knob") == [30.0, 30.0, 15.0]
+  example dims_of("wall_hook") == [35.0, 60.0, 20.0]
+  example dims_of("shelf_bracket") == [80.0, 80.0, 20.0]
+  example dims_of("gear") == [44.0, 44.0, 6.0]
+  example dims_of("plant_pot") == [90.0, 90.0, 80.0]
+  example build("nope", jsonx.obj()) == Err("Unknown shape: nope")
+
+  match find(id) {
+    Some(pt) -> {
+      let v: Json = resolve(pt, vals)
+      if pt.cat == "functional" {
+        return Ok(build_functional(id, v))
+      }
+      return Ok(build_basic(id, v))
+    }
+    None -> {
+      return Err("Unknown shape: " + id)
+    }
+  }
+}
+
+fn dims_of(id: Text) -> List[Float] {
+  match build(id, jsonx.obj()) {
+    Ok(b) -> {
+      return csg.dims(b.tree)
+    }
+    Err(e) -> {
+      return []
+    }
+  }
+}
+
+fn build_json(id: Text, vals: Json) -> Json {
+  example jsonx.boolean(build_json("box", jsonx.obj()), "ok", false)
+  example jsonx.text(build_json("gear", jsonx.obj()), "id", "") == "gear"
+  example len(jsonx.items(build_json("storage_box", jsonx.putn(jsonx.obj(), "wall", 0.8)), "warnings")) == 0
+  example len(jsonx.items(build_json("storage_box", jsonx.putn(jsonx.putn(jsonx.obj(), "wall", 0.8), "_nozzle", 0.6)), "warnings")) == 1
+
+  match find(id) {
+    Some(pt) -> {
+      let v: Json = resolve(pt, vals)
+      match build(id, vals) {
+        Ok(b) -> {
+          var j: Json = jsonx.obj()
+          j = jsonx.putt(j, "id", id)
+          j = jsonx.put(j, "tree", b.tree)
+          j = jsonx.put(j, "values", v)
+          j = jsonx.put(j, "warnings", jsonx.texts(b.warnings))
+          j = jsonx.put(j, "info", jsonx.texts(b.info))
+          j = jsonx.put(j, "dims", jsonx.nums(csg.dims(b.tree)))
+          return jsonx.ok(j)
+        }
+        Err(e) -> {
+          return jsonx.fail(e)
+        }
+      }
+    }
+    None -> {
+      return jsonx.fail("Unknown shape: " + id)
+    }
+  }
+}

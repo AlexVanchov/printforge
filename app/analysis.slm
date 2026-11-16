@@ -1,0 +1,408 @@
+# analysis — "Will this print?" in plain words.
+#
+# Input: the model exactly as it will be exported (a triangle soup in bed
+# coordinates: the bed is centred on the origin, z = 0 is the bed surface),
+# plus the chosen printer, material and slicer basics. Output: size, volume,
+# weight, cost and time estimates, a 0-100 printability score, and a short
+# list of checks — each with a level (ok / info / warn / error), a sentence a
+# beginner understands, and when possible a one-click fix the page can apply.
+#
+# It also tries all six "which side down" orientations and recommends the one
+# that needs the least support material.
+
+import "fmath.slm"
+import "jsonx.slm"
+import "meshio.slm"
+import "printers.slm"
+import "sizing.slm"
+
+type Bounds = { x0: Float, y0: Float, z0: Float, x1: Float, y1: Float, z1: Float, area: Float, vol: Float }
+
+type Orient = { name: Text, rx: Float, ry: Float, rz: Float, overhang: Float, support: Float, contact: Float, height: Float }
+
+type Check = { id: Text, level: Text, title: Text, detail: Text, action: Text }
+
+type Settings = { infill: Float, layer: Float, walls: Float }
+
+fn tri(xs: List[Json]) -> Int {
+  return len(xs) / 9
+}
+
+# One pass: bounding box, surface area and enclosed volume.
+fn bounds(xs: List[Json]) -> Bounds {
+  example fmath.near(bounds(cube(10.0)).vol, 1000.0, 0.000001)
+  example bounds(cube(10.0)).area == 600.0
+  example bounds(cube(10.0)).z1 == 10.0
+
+  var x0: Float = 1000000000.0
+  var y0: Float = 1000000000.0
+  var z0: Float = 1000000000.0
+  var x1: Float = -1000000000.0
+  var y1: Float = -1000000000.0
+  var z1: Float = -1000000000.0
+  var area: Float = 0.0
+  var vol: Float = 0.0
+  let n: Int = tri(xs)
+  var i: Int = 0
+  while i < n {
+    let o: Int = i * 9
+    let ax: Float = meshio.fv(xs, o)
+    let ay: Float = meshio.fv(xs, o + 1)
+    let az: Float = meshio.fv(xs, o + 2)
+    let bx: Float = meshio.fv(xs, o + 3)
+    let by: Float = meshio.fv(xs, o + 4)
+    let bz: Float = meshio.fv(xs, o + 5)
+    let cx: Float = meshio.fv(xs, o + 6)
+    let cy: Float = meshio.fv(xs, o + 7)
+    let cz: Float = meshio.fv(xs, o + 8)
+    x0 = fmath.minf(x0, fmath.minf(ax, fmath.minf(bx, cx)))
+    y0 = fmath.minf(y0, fmath.minf(ay, fmath.minf(by, cy)))
+    z0 = fmath.minf(z0, fmath.minf(az, fmath.minf(bz, cz)))
+    x1 = fmath.maxf(x1, fmath.maxf(ax, fmath.maxf(bx, cx)))
+    y1 = fmath.maxf(y1, fmath.maxf(ay, fmath.maxf(by, cy)))
+    z1 = fmath.maxf(z1, fmath.maxf(az, fmath.maxf(bz, cz)))
+    let ux: Float = bx - ax
+    let uy: Float = by - ay
+    let uz: Float = bz - az
+    let vx: Float = cx - ax
+    let vy: Float = cy - ay
+    let vz: Float = cz - az
+    let nx: Float = uy * vz - uz * vy
+    let ny: Float = uz * vx - ux * vz
+    let nz: Float = ux * vy - uy * vx
+    area = area + fmath.sqrtf(nx * nx + ny * ny + nz * nz) / 2.0
+    vol = vol + (ax * (by * cz - bz * cy) - ay * (bx * cz - bz * cx) + az * (bx * cy - by * cx)) / 6.0
+    i = i + 1
+  }
+  if n == 0 {
+    return Bounds { x0: 0.0, y0: 0.0, z0: 0.0, x1: 0.0, y1: 0.0, z1: 0.0, area: 0.0, vol: 0.0 }
+  }
+  return Bounds { x0: x0, y0: y0, z0: z0, x1: x1, y1: y1, z1: z1, area: area, vol: fmath.absf(vol) }
+}
+
+# Overhang, support and bed-contact figures when direction (ux,uy,uz) points
+# up and the lowest point (`floor` along that direction) sits on the bed.
+fn orient_stats(xs: List[Json], name: Text, ux: Float, uy: Float, uz: Float, floor: Float, top: Float, rx: Float, ry: Float, rz: Float) -> Orient {
+  let n: Int = tri(xs)
+  var overhang: Float = 0.0
+  var support: Float = 0.0
+  var contact: Float = 0.0
+  var i: Int = 0
+  while i < n {
+    let o: Int = i * 9
+    let ax: Float = meshio.fv(xs, o)
+    let ay: Float = meshio.fv(xs, o + 1)
+    let az: Float = meshio.fv(xs, o + 2)
+    let bx: Float = meshio.fv(xs, o + 3)
+    let by: Float = meshio.fv(xs, o + 4)
+    let bz: Float = meshio.fv(xs, o + 5)
+    let cx: Float = meshio.fv(xs, o + 6)
+    let cy: Float = meshio.fv(xs, o + 7)
+    let cz: Float = meshio.fv(xs, o + 8)
+    let ex: Float = bx - ax
+    let ey: Float = by - ay
+    let ez: Float = bz - az
+    let fx: Float = cx - ax
+    let fy: Float = cy - ay
+    let fz: Float = cz - az
+    let nx: Float = ey * fz - ez * fy
+    let ny: Float = ez * fx - ex * fz
+    let nz: Float = ex * fy - ey * fx
+    let l: Float = fmath.sqrtf(nx * nx + ny * ny + nz * nz)
+    if l > 0.0 {
+      let down: Float = 0.0 - (nx * ux + ny * uy + nz * uz) / l
+      if down > 0.7072 {
+        let ha: Float = ax * ux + ay * uy + az * uz - floor
+        let hb: Float = bx * ux + by * uy + bz * uz - floor
+        let hc: Float = cx * ux + cy * uy + cz * uz - floor
+        let hmax: Float = fmath.maxf(ha, fmath.maxf(hb, hc))
+        let a: Float = l / 2.0
+        if down > 0.999 and hmax < 0.15 {
+          contact = contact + a
+        } else {
+          overhang = overhang + a
+          support = support + a * down * (ha + hb + hc) / 3.0
+        }
+      }
+    }
+    i = i + 1
+  }
+  return Orient { name: name, rx: rx, ry: ry, rz: rz, overhang: overhang, support: support, contact: contact, height: top - floor }
+}
+
+# Lower is better: support material dominates, then height, and a solid
+# footprint wins ties.
+fn orient_cost(o: Orient) -> Float {
+  example orient_cost(Orient { name: "", rx: 0.0, ry: 0.0, rz: 0.0, overhang: 0.0, support: 0.0, contact: 400.0, height: 10.0 }) < orient_cost(Orient { name: "", rx: 0.0, ry: 0.0, rz: 0.0, overhang: 0.0, support: 0.0, contact: 10.0, height: 10.0 })
+
+  return o.support / 1000.0 + o.height / 200.0 - fmath.minf(o.contact, 400.0) / 400.0
+}
+
+fn orientations(xs: List[Json], b: Bounds) -> List[Orient] {
+  return [orient_stats(xs, "As placed", 0.0, 0.0, 1.0, b.z0, b.z1, 0.0, 0.0, 0.0), orient_stats(xs, "Upside down", 0.0, 0.0, -1.0, 0.0 - b.z1, 0.0 - b.z0, 180.0, 0.0, 0.0), orient_stats(xs, "Right side down", 1.0, 0.0, 0.0, b.x0, b.x1, 0.0, -90.0, 0.0), orient_stats(xs, "Left side down", -1.0, 0.0, 0.0, 0.0 - b.x1, 0.0 - b.x0, 0.0, 90.0, 0.0), orient_stats(xs, "Back side down", 0.0, 1.0, 0.0, b.y0, b.y1, 90.0, 0.0, 0.0), orient_stats(xs, "Front side down", 0.0, -1.0, 0.0, 0.0 - b.y1, 0.0 - b.y0, -90.0, 0.0, 0.0)]
+}
+
+fn best_orient(os: List[Orient]) -> Int {
+  var best: Int = 0
+  var cost: Float = 1000000000000.0
+  var i: Int = 0
+  for o in os {
+    let c: Float = orient_cost(o)
+    if c < cost - 0.000001 {
+      cost = c
+      best = i
+    }
+    i = i + 1
+  }
+  return best
+}
+
+fn orient_at(os: List[Orient], i: Int) -> Orient {
+  match get(os, i) {
+    Some(o) -> {
+      return o
+    }
+    None -> {
+      return Orient { name: "As placed", rx: 0.0, ry: 0.0, rz: 0.0, overhang: 0.0, support: 0.0, contact: 0.0, height: 0.0 }
+    }
+  }
+}
+
+fn check(id: Text, level: Text, title: Text, detail: Text, action: Text) -> Check {
+  return Check { id: id, level: level, title: title, detail: detail, action: action }
+}
+
+fn duration(minutes: Float) -> Text {
+  example duration(45.4) == "45 min"
+  example duration(135.0) == "2 h 15 min"
+  example duration(0.2) == "1 min"
+
+  let m: Int = fmath.maxi(fmath.round_int(minutes), 1)
+  if m < 60 {
+    return to_text(m) + " min"
+  }
+  return to_text(m / 60) + " h " + to_text(m % 60) + " min"
+}
+
+fn level_penalty(level: Text) -> Int {
+  if level == "error" {
+    return 30
+  }
+  if level == "warn" {
+    return 10
+  }
+  return 0
+}
+
+fn score(cs: List[Check]) -> Int {
+  example score([check("a", "error", "", "", ""), check("b", "warn", "", "", ""), check("c", "ok", "", "", "")]) == 60
+  example score([]) == 100
+
+  var s: Int = 100
+  for c in cs {
+    s = s - level_penalty(c.level)
+  }
+  return fmath.maxi(s, 0)
+}
+
+fn mm(x: Float) -> Text {
+  return fmath.fmt(x, 1) + " mm"
+}
+
+# All the checks, in the order a person should deal with them.
+fn checks(b: Bounds, pr: printers.Printer, mt: printers.Material, os: List[Orient], best: Int, watertight: Bool, pieces: Int) -> List[Check] {
+  var cs: List[Check] = []
+  let dx: Float = b.x1 - b.x0
+  let dy: Float = b.y1 - b.y0
+  let dz: Float = b.z1 - b.z0
+  let dims: sizing.V3 = sizing.v3(dx, dy, dz)
+  let bed: sizing.V3 = sizing.v3(pr.bx, pr.by, pr.bz)
+  # 1. size
+  if sizing.fits(dims, bed) {
+    cs = push(cs, check("size", "ok", "Fits on your " + pr.brand + " " + pr.name, "Uses " + mm(dx) + " x " + mm(dy) + " of the " + fmath.fmt(pr.bx, 0) + " x " + fmath.fmt(pr.by, 0) + " mm bed.", ""))
+  } else {
+    let fit: sizing.Fit = sizing.fit_bed(dims, bed, 5.0, false)
+    if fit.factor >= 0.999 and fit.rotate {
+      cs = push(cs, check("size", "warn", "Turn it to fit the bed", "It is too long for the bed this way round, but it fits if you rotate it 90 degrees.", "rotate_bed"))
+    } else {
+      cs = push(cs, check("size", "error", "Too big for your printer", "The model is " + mm(dx) + " x " + mm(dy) + " x " + mm(dz) + " but the printer holds " + fmath.fmt(pr.bx, 0) + " x " + fmath.fmt(pr.by, 0) + " x " + fmath.fmt(pr.bz, 0) + " mm. Scale it to " + fmath.fmt(fit.factor * 100.0, 1) + "% or split it into parts.", "fit_bed"))
+    }
+  }
+  # 2. on the bed
+  if b.z0 > 0.05 {
+    cs = push(cs, check("floating", "error", "Floating above the bed", "The lowest point is " + mm(b.z0) + " above the bed. Printers need the model to sit on the bed.", "drop"))
+  } else if b.z0 < -0.05 {
+    cs = push(cs, check("floating", "warn", "Partly below the bed", "The bottom " + mm(0.0 - b.z0) + " is below the bed and would be cut off.", "drop"))
+  }
+  let hx: Float = pr.bx / 2.0
+  let hy: Float = pr.by / 2.0
+  if sizing.fits(dims, bed) and (b.x0 < 0.0 - hx - 0.01 or b.x1 > hx + 0.01 or b.y0 < 0.0 - hy - 0.01 or b.y1 > hy + 0.01) {
+    cs = push(cs, check("offbed", "error", "Hanging off the edge of the bed", "Part of the model is outside the printable area.", "center"))
+  }
+  # 3. mesh health
+  if not watertight {
+    cs = push(cs, check("mesh", "error", "The model has holes in its surface", "Slicers may fill it wrongly or refuse it. Use Repair to close it.", "repair"))
+  }
+  # 4. supports and orientation
+  let cur: Orient = orient_at(os, 0)
+  let bo: Orient = orient_at(os, best)
+  let sup_cm3: Float = cur.support / 1000.0 * 0.2
+  if cur.overhang < 1.0 or sup_cm3 < 0.05 {
+    cs = push(cs, check("supports", "ok", "No supports needed", "Every surface is at most 45 degrees from upright, or sits on the bed.", ""))
+  } else if best != 0 and bo.support < cur.support * 0.7 {
+    cs = push(cs, check("supports", "warn", "Needs supports - but there is a better way", "About " + fmath.fmt(cur.overhang / 100.0, 1) + " cm2 hangs over thin air. Laying it '" + bo.name + "' cuts the support material by " + fmath.fmt((1.0 - bo.support / fmath.maxf(cur.support, 0.001)) * 100.0, 0) + "%.", "orient"))
+  } else {
+    cs = push(cs, check("supports", "info", "Needs supports", "About " + fmath.fmt(cur.overhang / 100.0, 1) + " cm2 hangs over thin air. Turn on supports in your slicer (tree supports work well).", ""))
+  }
+  # 5. bed adhesion
+  let footprint: Float = fmath.maxf(dx * dy, 0.0001)
+  if b.z0 <= 0.05 and cur.contact < 20.0 and dz > 2.0 {
+    cs = push(cs, check("contact", "warn", "Tiny contact with the bed", "Only " + fmath.fmt(cur.contact, 0) + " mm2 touches the bed, so it may come loose. Add a brim in your slicer or give it a flat bottom.", ""))
+  } else if b.z0 <= 0.05 and dz > 3.0 * fmath.sqrtf(fmath.maxf(cur.contact, 1.0)) and dz > 40.0 {
+    cs = push(cs, check("tall", "warn", "Tall and narrow", "It is " + mm(dz) + " tall on a small base and may wobble. Add a brim and print a little slower.", ""))
+  }
+  # 6. tiny things
+  let small: Float = fmath.minf(dx, fmath.minf(dy, dz))
+  if small < pr.nozzle * 2.0 and dz > 0.0 {
+    cs = push(cs, check("thin", "warn", "Very thin", "The thinnest side is " + fmath.fmt(small, 2) + " mm. Below " + fmath.fmt(pr.nozzle * 2.0, 1) + " mm (two nozzle widths) it may not print.", ""))
+  }
+  if fmath.maxf(dx, fmath.maxf(dy, dz)) < 5.0 and dz > 0.0 {
+    cs = push(cs, check("tiny", "warn", "Very small model", "It is under 5 mm. Small details may melt together. Check the size is right.", ""))
+  }
+  # 7. material hints
+  if (mt.id == "abs" or mt.id == "asa") and (dx > 120.0 or dy > 120.0) {
+    cs = push(cs, check("warp", "info", "Large " + mt.name + " parts can warp", "Use an enclosed printer, a brim, and avoid drafts.", ""))
+  }
+  if pieces > 1 {
+    cs = push(cs, check("pieces", "info", to_text(pieces) + " separate pieces", "They will all print together in one go.", ""))
+  }
+  return cs
+}
+
+fn settings_of(j: Json) -> Settings {
+  return Settings { infill: fmath.clampf(jsonx.num(j, "infill", 15.0), 0.0, 100.0), layer: fmath.clampf(jsonx.num(j, "layer", 0.2), 0.04, 0.6), walls: fmath.clampf(jsonx.num(j, "walls", 2.0), 1.0, 10.0) }
+}
+
+# Material used (mm3): shells, sparse infill, and support.
+fn material_mm3(b: Bounds, st: Settings, nozzle: Float, support: Float) -> Float {
+  example fmath.near(material_mm3(Bounds { x0: 0.0, y0: 0.0, z0: 0.0, x1: 10.0, y1: 10.0, z1: 10.0, area: 600.0, vol: 1000.0 }, Settings { infill: 100.0, layer: 0.2, walls: 2.0 }, 0.4, 0.0), 1000.0, 0.001)
+
+  let shell_t: Float = fmath.maxf(st.walls * nozzle * 1.125, 4.0 * st.layer)
+  let shell: Float = fmath.minf(b.area * shell_t, b.vol)
+  let inner: Float = (b.vol - shell) * st.infill / 100.0
+  return shell + inner + support * 0.2
+}
+
+fn orient_json(o: Orient) -> Json {
+  var j: Json = jsonx.obj()
+  j = jsonx.putt(j, "name", o.name)
+  j = jsonx.put(j, "rot", jsonx.nums([o.rx, o.ry, o.rz]))
+  j = jsonx.putn(j, "overhang", fmath.roundf(o.overhang))
+  j = jsonx.putn(j, "support", fmath.roundf(o.support * 0.2))
+  j = jsonx.putn(j, "contact", fmath.roundf(o.contact))
+  j = jsonx.putn(j, "height", fmath.roundf(o.height * 100.0) / 100.0)
+  return j
+}
+
+fn check_json(c: Check) -> Json {
+  var j: Json = jsonx.obj()
+  j = jsonx.putt(j, "id", c.id)
+  j = jsonx.putt(j, "level", c.level)
+  j = jsonx.putt(j, "title", c.title)
+  j = jsonx.putt(j, "detail", c.detail)
+  j = jsonx.putt(j, "action", c.action)
+  return j
+}
+
+# The full report for the page.
+fn analyze(xs: List[Json], printer_id: Text, material_id: Text, st: Settings, watertight: Bool, pieces: Int) -> Json {
+  example jsonx.num(analyze(cube(10.0), "bambu_a1", "pla", Settings { infill: 15.0, layer: 0.2, walls: 2.0 }, true, 1), "score", 0.0) == 100.0
+  example jsonx.num(analyze(lifted(cube(10.0), 5.0), "bambu_a1", "pla", Settings { infill: 15.0, layer: 0.2, walls: 2.0 }, true, 1), "score", 0.0) == 70.0
+  example jsonx.num(analyze(cube(300.0), "bambu_a1", "pla", Settings { infill: 15.0, layer: 0.2, walls: 2.0 }, true, 1), "score", 0.0) == 70.0
+  example jsonx.boolean(analyze([], "bambu_a1", "pla", Settings { infill: 15.0, layer: 0.2, walls: 2.0 }, true, 1), "empty", false)
+
+  let pr: printers.Printer = printers.printer(printer_id)
+  let mt: printers.Material = printers.material(material_id)
+  if tri(xs) == 0 {
+    return jsonx.putb(jsonx.ok(jsonx.obj()), "empty", true)
+  }
+  let b: Bounds = bounds(xs)
+  let os: List[Orient] = orientations(xs, b)
+  let best: Int = best_orient(os)
+  let cs: List[Check] = checks(b, pr, mt, os, best, watertight, pieces)
+  let cur: Orient = orient_at(os, 0)
+  let used: Float = material_mm3(b, st, pr.nozzle, cur.support)
+  let grams: Float = used / 1000.0 * mt.density
+  let meters: Float = used / (3.141592653589793 * 0.875 * 0.875) / 1000.0
+  let layers: Float = fmath.ceilf((b.z1 - fmath.maxf(b.z0, 0.0)) / st.layer)
+  let minutes: Float = (used / pr.flow * 1.15 + layers * 1.6) / 60.0 + 2.0
+  var css: List[Json] = []
+  for c in cs {
+    css = push(css, check_json(c))
+  }
+  var ojs: List[Json] = []
+  for o in os {
+    ojs = push(ojs, orient_json(o))
+  }
+  var j: Json = jsonx.obj()
+  j = jsonx.putb(j, "empty", false)
+  j = jsonx.put(j, "dims", jsonx.nums([b.x1 - b.x0, b.y1 - b.y0, b.z1 - b.z0]))
+  j = jsonx.put(j, "min", jsonx.nums([b.x0, b.y0, b.z0]))
+  j = jsonx.putn(j, "volume_cm3", fmath.roundf(b.vol / 10.0) / 100.0)
+  j = jsonx.putn(j, "area_cm2", fmath.roundf(b.area) / 100.0)
+  j = jsonx.putn(j, "triangles", to_float(tri(xs)))
+  j = jsonx.putn(j, "grams", fmath.roundf(grams * 10.0) / 10.0)
+  j = jsonx.putn(j, "meters", fmath.roundf(meters * 100.0) / 100.0)
+  j = jsonx.putn(j, "cost", fmath.roundf(grams / 1000.0 * mt.price * 100.0) / 100.0)
+  j = jsonx.putn(j, "minutes", fmath.roundf(minutes))
+  j = jsonx.putt(j, "time_text", duration(minutes))
+  j = jsonx.putn(j, "layers", layers)
+  j = jsonx.putn(j, "score", to_float(score(cs)))
+  j = jsonx.put(j, "checks", JList(css))
+  j = jsonx.put(j, "orientations", JList(ojs))
+  j = jsonx.putn(j, "best", to_float(best))
+  j = jsonx.putt(j, "printer", pr.brand + " " + pr.name)
+  j = jsonx.putt(j, "material", mt.name)
+  return jsonx.ok(j)
+}
+
+# ---- test meshes ----------------------------------------------------------
+
+fn quad(x0: Float, y0: Float, z0: Float, x1: Float, y1: Float, z1: Float, x2: Float, y2: Float, z2: Float, x3: Float, y3: Float, z3: Float) -> List[Json] {
+  return [JNum(x0), JNum(y0), JNum(z0), JNum(x1), JNum(y1), JNum(z1), JNum(x2), JNum(y2), JNum(z2), JNum(x0), JNum(y0), JNum(z0), JNum(x2), JNum(y2), JNum(z2), JNum(x3), JNum(y3), JNum(z3)]
+}
+
+fn cat(a: List[Json], b: List[Json]) -> List[Json] {
+  var out: List[Json] = a
+  for x in b {
+    out = push(out, x)
+  }
+  return out
+}
+
+# An s-sided cube on the bed, outward-facing triangles.
+fn cube(s: Float) -> List[Json] {
+  example len(cube(1.0)) == 108
+
+  var m: List[Json] = quad(0.0, 0.0, 0.0, 0.0, s, 0.0, s, s, 0.0, s, 0.0, 0.0)
+  m = cat(m, quad(0.0, 0.0, s, s, 0.0, s, s, s, s, 0.0, s, s))
+  m = cat(m, quad(0.0, 0.0, 0.0, s, 0.0, 0.0, s, 0.0, s, 0.0, 0.0, s))
+  m = cat(m, quad(0.0, s, 0.0, 0.0, s, s, s, s, s, s, s, 0.0))
+  m = cat(m, quad(0.0, 0.0, 0.0, 0.0, 0.0, s, 0.0, s, s, 0.0, s, 0.0))
+  m = cat(m, quad(s, 0.0, 0.0, s, s, 0.0, s, s, s, s, 0.0, s))
+  return m
+}
+
+fn lifted(xs: List[Json], dz: Float) -> List[Json] {
+  var out: List[Json] = []
+  var i: Int = 0
+  for v in xs {
+    if i % 3 == 2 {
+      out = push(out, JNum(jsonx.num_or(v, 0.0) + dz))
+    } else {
+      out = push(out, v)
+    }
+    i = i + 1
+  }
+  return out
+}

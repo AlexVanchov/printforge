@@ -1,0 +1,21 @@
+{
+  "name": "printforge",
+  "version": "1.0.0",
+  "description": "PrintForge - easy 3D design for 3D printing, built with Solemn",
+  "main": "index.js",
+  "scripts": {
+    "build": "node tools/build.mjs",
+    "test": "node tests/node/kernel.test.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "devDependencies": {
+    "@playwright/test": "^1.65.1",
+    "esbuild": "^0.25.0",
+    "manifold-3d": "^3.5.5",
+    "three": "^0.170.0"
+  },
+  "private": true
+}

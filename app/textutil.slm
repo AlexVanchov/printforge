@@ -1,0 +1,251 @@
+# textutil — byte-level Text helpers.
+#
+# Solemn Text is immutable UTF-8 with no slicing builtins, and `+` copies
+# both operands. So: inspection goes through Bytes (O(1) bytes_get), and big
+# outputs are assembled by balanced divide-and-conquer (`join`) so the total
+# copying stays O(n log n) instead of the O(n^2) of a running accumulator.
+
+fn byte_at(b: Bytes, i: Int) -> Int {
+  example byte_at(text_to_bytes("AB"), 1) == 66
+  example byte_at(text_to_bytes("AB"), 2) == -1
+  example byte_at(text_to_bytes("AB"), -1) == -1
+
+  match bytes_get(b, i) {
+    Some(v) -> {
+      return v
+    }
+    None -> {
+      return -1
+    }
+  }
+}
+
+fn ascii_table() -> List[Text] {
+  return ["", "", "", "", "", "", "", "", "", "\t", "\n", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", " ", "!", "\"", "#", "$", "%", "&", "'", "(", ")", "*", "+", ",", "-", ".", "/", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ":", ";", "<", "=", ">", "?", "@", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z", "[", "\\", "]", "^", "_", "`", "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z", "{", "|", "}", "~", ""]
+}
+
+# The one-character Text for an ASCII code ("" for control/non-ASCII codes).
+fn ascii_char(code: Int) -> Text {
+  example ascii_char(65) == "A"
+  example ascii_char(34) == "\""
+  example ascii_char(200) == ""
+
+  match get(ascii_table(), code) {
+    Some(t) -> {
+      return t
+    }
+    None -> {
+      return ""
+    }
+  }
+}
+
+fn is_digit(c: Int) -> Bool {
+  example is_digit(48)
+  example not is_digit(65)
+
+  return c >= 48 and c <= 57
+}
+
+fn is_space(c: Int) -> Bool {
+  example is_space(32)
+  example is_space(9)
+  example not is_space(65)
+
+  return c == 32 or c == 9 or c == 10 or c == 13
+}
+
+fn lower_byte(c: Int) -> Int {
+  example lower_byte(65) == 97
+  example lower_byte(97) == 97
+  example lower_byte(49) == 49
+
+  if c >= 65 and c <= 90 {
+    return c + 32
+  }
+  return c
+}
+
+# Case-insensitive ASCII suffix test (suffix given in lower case).
+fn ends_with_ci(t: Text, suffix: Text) -> Bool {
+  example ends_with_ci("Model.STL", ".stl")
+  example ends_with_ci("a.obj", ".obj")
+  example not ends_with_ci("stl", ".stl")
+  example not ends_with_ci("model.stl.txt", ".stl")
+
+  let b: Bytes = text_to_bytes(t)
+  let s: Bytes = text_to_bytes(suffix)
+  let nb: Int = len(b)
+  let ns: Int = len(s)
+  if ns > nb {
+    return false
+  }
+  var i: Int = 0
+  while i < ns {
+    if lower_byte(byte_at(b, nb - ns + i)) != byte_at(s, i) {
+      return false
+    }
+    i = i + 1
+  }
+  return true
+}
+
+fn starts_with(t: Text, prefix: Text) -> Bool {
+  example starts_with("solid cube", "solid")
+  example not starts_with("sol", "solid")
+
+  let b: Bytes = text_to_bytes(t)
+  let p: Bytes = text_to_bytes(prefix)
+  if len(p) > len(b) {
+    return false
+  }
+  var i: Int = 0
+  while i < len(p) {
+    if byte_at(b, i) != byte_at(p, i) {
+      return false
+    }
+    i = i + 1
+  }
+  return true
+}
+
+fn contains_byte(t: Text, c: Int) -> Bool {
+  example contains_byte("a/b", 47)
+  example not contains_byte("ab", 47)
+
+  let b: Bytes = text_to_bytes(t)
+  var i: Int = 0
+  while i < len(b) {
+    if byte_at(b, i) == c {
+      return true
+    }
+    i = i + 1
+  }
+  return false
+}
+
+# A safe single path component for a user-chosen file name: not empty, not
+# hidden, no separators or control bytes, and not absurdly long.
+fn valid_file_name(t: Text) -> Bool {
+  example valid_file_name("My bracket v2")
+  example valid_file_name("Zahnrad größe")
+  example not valid_file_name("")
+  example not valid_file_name(".hidden")
+  example not valid_file_name("a/b")
+  example not valid_file_name("a\\b")
+  example not valid_file_name("..")
+
+  let b: Bytes = text_to_bytes(t)
+  let n: Int = len(b)
+  if n == 0 or n > 200 {
+    return false
+  }
+  if byte_at(b, 0) == 46 {
+    return false
+  }
+  var i: Int = 0
+  while i < n {
+    let c: Int = byte_at(b, i)
+    if c < 32 or c == 47 or c == 92 or c == 58 or c == 127 {
+      return false
+    }
+    i = i + 1
+  }
+  return true
+}
+
+fn join_range(xs: List[Text], lo: Int, hi: Int, sep: Text) -> Text {
+  requires lo <= hi
+
+  if hi - lo <= 0 {
+    return ""
+  }
+  if hi - lo == 1 {
+    match get(xs, lo) {
+      Some(t) -> {
+        return t
+      }
+      None -> {
+        return ""
+      }
+    }
+  }
+  let mid: Int = (lo + hi) / 2
+  return join_range(xs, lo, mid, sep) + sep + join_range(xs, mid, hi, sep)
+}
+
+# Join with a separator in O(n log n) total copying.
+fn join(xs: List[Text], sep: Text) -> Text {
+  example join(["a", "b", "c"], ",") == "a,b,c"
+  example join(["solo"], ", ") == "solo"
+  example join([], ",") == ""
+
+  return join_range(xs, 0, len(xs), sep)
+}
+
+fn b64_alphabet() -> List[Text] {
+  return ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z", "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "+", "/"]
+}
+
+fn b64_sym(tab: List[Text], v: Int) -> Text {
+  match get(tab, v) {
+    Some(t) -> {
+      return t
+    }
+    None -> {
+      return "="
+    }
+  }
+}
+
+# Base64 of the 3-byte groups [lo, hi) of b (balanced recursion).
+fn b64_groups(b: Bytes, tab: List[Text], lo: Int, hi: Int) -> Text {
+  requires lo <= hi
+
+  if hi - lo > 48 {
+    let mid: Int = (lo + hi) / 2
+    return b64_groups(b, tab, lo, mid) + b64_groups(b, tab, mid, hi)
+  }
+  let n: Int = len(b)
+  var out: Text = ""
+  var g: Int = lo
+  while g < hi {
+    let i: Int = g * 3
+    let b0: Int = byte_at(b, i)
+    let b1: Int = byte_at(b, i + 1)
+    let b2: Int = byte_at(b, i + 2)
+    let c1: Int = maxz(b1)
+    let c2: Int = maxz(b2)
+    let s0: Text = b64_sym(tab, b0 / 4)
+    let s1: Text = b64_sym(tab, (b0 % 4) * 16 + c1 / 16)
+    var s2: Text = "="
+    var s3: Text = "="
+    if i + 1 < n {
+      s2 = b64_sym(tab, (c1 % 16) * 4 + c2 / 64)
+    }
+    if i + 2 < n {
+      s3 = b64_sym(tab, c2 % 64)
+    }
+    out = out + s0 + s1 + s2 + s3
+    g = g + 1
+  }
+  return out
+}
+
+fn maxz(v: Int) -> Int {
+  if v < 0 {
+    return 0
+  }
+  return v
+}
+
+fn base64(b: Bytes) -> Text {
+  example base64(text_to_bytes("Man")) == "TWFu"
+  example base64(text_to_bytes("Ma")) == "TWE="
+  example base64(text_to_bytes("M")) == "TQ=="
+  example base64(text_to_bytes("")) == ""
+  example base64(text_to_bytes("hello world")) == "aGVsbG8gd29ybGQ="
+
+  let groups: Int = (len(b) + 2) / 3
+  return b64_groups(b, b64_alphabet(), 0, groups)
+}

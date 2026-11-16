@@ -1,0 +1,491 @@
+# meshio — STL and OBJ files.
+#
+# Meshes cross the bridge as a flat "triangle soup": 9 numbers per triangle
+# (x y z of each corner, millimetres, counter-clockwise seen from outside).
+#
+#   encode_stl / encode_obj   soup -> file text (ASCII STL works in every
+#                             slicer: PrusaSlicer, Bambu Studio, Cura, Orca)
+#   decode_stl                file bytes -> soup, binary or ASCII STL
+#
+# Large meshes are handled with balanced divide-and-conquer so the total
+# copying stays O(n log n) (Solemn Text `+` copies both sides). Decoded
+# coordinates travel as integers in units of 0.0001 mm: compact, exact enough
+# for any printer, and cheap to render.
+
+import "csg.slm"
+import "fmath.slm"
+import "textutil.slm"
+
+type Chunk = { t: Text, b: csg.Box3, nv: Int }
+
+type Decoded = { kind: Text, tris: Int, data: Text, b: csg.Box3, bad: Int }
+
+fn fv(xs: List[Json], i: Int) -> Float {
+  match get(xs, i) {
+    Some(v) -> {
+      match v {
+        JNum(x) -> {
+          return x
+        }
+        _ -> {
+          return 0.0
+        }
+      }
+    }
+    None -> {
+      return 0.0
+    }
+  }
+}
+
+fn f4(x: Float) -> Text {
+  example f4(1.23456) == "1.2346"
+  example f4(-0.0) == "0"
+
+  return fmath.fmt(x, 4)
+}
+
+fn sample_tri() -> List[Json] {
+  return [JNum(0.0), JNum(0.0), JNum(0.0), JNum(10.0), JNum(0.0), JNum(0.0), JNum(0.0), JNum(10.0), JNum(0.0)]
+}
+
+# One "facet ... endfacet" block with a unit normal computed from the corners.
+fn facet(xs: List[Json], i: Int) -> Text {
+  example facet(sample_tri(), 0) == "facet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 10 0 0\nvertex 0 10 0\nendloop\nendfacet\n"
+
+  let o: Int = i * 9
+  let ax: Float = fv(xs, o)
+  let ay: Float = fv(xs, o + 1)
+  let az: Float = fv(xs, o + 2)
+  let bx: Float = fv(xs, o + 3)
+  let by: Float = fv(xs, o + 4)
+  let bz: Float = fv(xs, o + 5)
+  let cx: Float = fv(xs, o + 6)
+  let cy: Float = fv(xs, o + 7)
+  let cz: Float = fv(xs, o + 8)
+  let ux: Float = bx - ax
+  let uy: Float = by - ay
+  let uz: Float = bz - az
+  let vx: Float = cx - ax
+  let vy: Float = cy - ay
+  let vz: Float = cz - az
+  var nx: Float = uy * vz - uz * vy
+  var ny: Float = uz * vx - ux * vz
+  var nz: Float = ux * vy - uy * vx
+  let l: Float = fmath.sqrtf(nx * nx + ny * ny + nz * nz)
+  if l > 0.0 {
+    nx = nx / l
+    ny = ny / l
+    nz = nz / l
+  }
+  var t: Text = "facet normal " + fmath.fmt(nx, 6) + " " + fmath.fmt(ny, 6) + " " + fmath.fmt(nz, 6) + "\nouter loop\n"
+  t = t + "vertex " + f4(ax) + " " + f4(ay) + " " + f4(az) + "\n"
+  t = t + "vertex " + f4(bx) + " " + f4(by) + " " + f4(bz) + "\n"
+  t = t + "vertex " + f4(cx) + " " + f4(cy) + " " + f4(cz) + "\nendloop\nendfacet\n"
+  return t
+}
+
+fn facets(xs: List[Json], lo: Int, hi: Int) -> Text {
+  requires lo <= hi
+
+  if hi - lo > 16 {
+    let mid: Int = (lo + hi) / 2
+    return facets(xs, lo, mid) + facets(xs, mid, hi)
+  }
+  var t: Text = ""
+  var i: Int = lo
+  while i < hi {
+    t = t + facet(xs, i)
+    i = i + 1
+  }
+  return t
+}
+
+fn encode_stl(name: Text, xs: List[Json]) -> Text {
+  example textutil.starts_with(encode_stl("part", sample_tri()), "solid part\nfacet normal 0 0 1\n")
+  example textutil.ends_with_ci(encode_stl("part", sample_tri()), "endfacet\nendsolid part\n")
+
+  return "solid " + name + "\n" + facets(xs, 0, len(xs) / 9) + "endsolid " + name + "\n"
+}
+
+fn obj_verts(xs: List[Json], lo: Int, hi: Int) -> Text {
+  requires lo <= hi
+
+  if hi - lo > 48 {
+    let mid: Int = (lo + hi) / 2
+    return obj_verts(xs, lo, mid) + obj_verts(xs, mid, hi)
+  }
+  var t: Text = ""
+  var i: Int = lo
+  while i < hi {
+    t = t + "v " + f4(fv(xs, i * 3)) + " " + f4(fv(xs, i * 3 + 1)) + " " + f4(fv(xs, i * 3 + 2)) + "\n"
+    i = i + 1
+  }
+  return t
+}
+
+fn obj_faces(lo: Int, hi: Int) -> Text {
+  requires lo <= hi
+
+  if hi - lo > 48 {
+    let mid: Int = (lo + hi) / 2
+    return obj_faces(lo, mid) + obj_faces(mid, hi)
+  }
+  var t: Text = ""
+  var i: Int = lo
+  while i < hi {
+    t = t + "f " + to_text(i * 3 + 1) + " " + to_text(i * 3 + 2) + " " + to_text(i * 3 + 3) + "\n"
+    i = i + 1
+  }
+  return t
+}
+
+fn encode_obj(name: Text, xs: List[Json]) -> Text {
+  example encode_obj("p", sample_tri()) == "# Made with PrintForge (units: mm)\no p\nv 0 0 0\nv 10 0 0\nv 0 10 0\nf 1 2 3\n"
+
+  let ntri: Int = len(xs) / 9
+  return "# Made with PrintForge (units: mm)\no " + name + "\n" + obj_verts(xs, 0, ntri * 3) + obj_faces(0, ntri)
+}
+
+# ---- decoding ----------------------------------------------------------------
+
+fn u32(b: Bytes, i: Int) -> Int {
+  example u32(text_to_bytes("\t\t\t\t"), 0) == 151587081
+
+  return textutil.byte_at(b, i) + textutil.byte_at(b, i + 1) * 256 + textutil.byte_at(b, i + 2) * 65536 + textutil.byte_at(b, i + 3) * 16777216
+}
+
+# 2^e for e = -149 .. 128, at index e + 149.
+fn pow2_table() -> List[Float] {
+  example len(pow2_table()) == 278
+
+  var v: Float = 1.0
+  var k: Int = 0
+  while k < 149 {
+    v = v / 2.0
+    k = k + 1
+  }
+  var t: List[Float] = []
+  var e: Int = 0
+  while e < 278 {
+    t = push(t, v)
+    v = v * 2.0
+    e = e + 1
+  }
+  return t
+}
+
+fn tab(t: List[Float], i: Int) -> Float {
+  match get(t, i) {
+    Some(v) -> {
+      return v
+    }
+    None -> {
+      return 0.0
+    }
+  }
+}
+
+# Little-endian IEEE-754 single at byte i (NaN/inf decode as 0.0).
+fn f32(b: Bytes, i: Int, p2: List[Float]) -> Float {
+  example f32(text_to_bytes("ABCD"), 0, pow2_table()) == 781.0352172851562
+
+  let b0: Int = textutil.byte_at(b, i)
+  let b1: Int = textutil.byte_at(b, i + 1)
+  let b2: Int = textutil.byte_at(b, i + 2)
+  let b3: Int = textutil.byte_at(b, i + 3)
+  let ex: Int = (b3 % 128) * 2 + b2 / 128
+  let mant: Int = (b2 % 128) * 65536 + b1 * 256 + b0
+  var v: Float = 0.0
+  if ex == 255 {
+    return 0.0
+  }
+  if ex == 0 {
+    v = to_float(mant) * tab(p2, 0)
+  } else {
+    v = to_float(8388608 + mant) * tab(p2, ex - 1)
+  }
+  if b3 >= 128 {
+    return 0.0 - v
+  }
+  return v
+}
+
+# A coordinate as an integer count of 0.0001 mm (clamped to +-100 m).
+fn q(x: Float) -> Int {
+  example q(1.23456) == 12346
+  example q(-2.0) == -20000
+
+  return fmath.round_int(fmath.clampf(x, -100000.0, 100000.0) * 10000.0)
+}
+
+fn empty_chunk() -> Chunk {
+  return Chunk { t: "", b: csg.empty_box(), nv: 0 }
+}
+
+fn join_chunks(a: Chunk, c: Chunk) -> Chunk {
+  if a.nv == 0 {
+    return c
+  }
+  if c.nv == 0 {
+    return a
+  }
+  return Chunk { t: a.t + "," + c.t, b: csg.merge(a.b, c.b), nv: a.nv + c.nv }
+}
+
+fn bin_tris(b: Bytes, p2: List[Float], lo: Int, hi: Int) -> Chunk {
+  requires lo <= hi
+
+  if hi - lo > 24 {
+    let mid: Int = (lo + hi) / 2
+    return join_chunks(bin_tris(b, p2, lo, mid), bin_tris(b, p2, mid, hi))
+  }
+  var t: Text = ""
+  var bx: csg.Box3 = csg.empty_box()
+  var i: Int = lo
+  while i < hi {
+    let o: Int = 84 + 50 * i + 12
+    var k: Int = 0
+    while k < 3 {
+      let x: Float = f32(b, o + 12 * k, p2)
+      let y: Float = f32(b, o + 12 * k + 4, p2)
+      let z: Float = f32(b, o + 12 * k + 8, p2)
+      bx = csg.add_point(bx, x, y, z)
+      if t == "" {
+        t = to_text(q(x)) + "," + to_text(q(y)) + "," + to_text(q(z))
+      } else {
+        t = t + "," + to_text(q(x)) + "," + to_text(q(y)) + "," + to_text(q(z))
+      }
+      k = k + 1
+    }
+    i = i + 1
+  }
+  return Chunk { t: t, b: bx, nv: (hi - lo) * 3 }
+}
+
+# ---- ASCII STL ------------------------------------------------------------------
+
+type Num = { ok: Bool, v: Float, pos: Int }
+
+fn skip_ws(b: Bytes, i: Int, hi: Int) -> Int {
+  var p: Int = i
+  while p < hi and textutil.is_space(textutil.byte_at(b, p)) {
+    p = p + 1
+  }
+  return p
+}
+
+fn pow10f(e: Int) -> Float {
+  example pow10f(3) == 1000.0
+  example pow10f(-2) == 0.01
+
+  var r: Float = 1.0
+  var k: Int = 0
+  if e >= 0 {
+    while k < e and k < 330 {
+      r = r * 10.0
+      k = k + 1
+    }
+    return r
+  }
+  while k < 0 - e and k < 330 {
+    r = r * 10.0
+    k = k + 1
+  }
+  return 1.0 / r
+}
+
+# A decimal number with optional sign, fraction and exponent (1.5e+01).
+fn scan_num(b: Bytes, i: Int, hi: Int) -> Num {
+  example scan_num(text_to_bytes("-1.5e+01 x"), 0, 10).v == -15.0
+  example scan_num(text_to_bytes("2.25"), 0, 4).v == 2.25
+  example not scan_num(text_to_bytes("x"), 0, 1).ok
+
+  var p: Int = skip_ws(b, i, hi)
+  var neg: Bool = false
+  if textutil.byte_at(b, p) == 45 {
+    neg = true
+    p = p + 1
+  } else if textutil.byte_at(b, p) == 43 {
+    p = p + 1
+  }
+  var v: Float = 0.0
+  var digits: Int = 0
+  while p < hi and textutil.is_digit(textutil.byte_at(b, p)) {
+    v = v * 10.0 + to_float(textutil.byte_at(b, p) - 48)
+    p = p + 1
+    digits = digits + 1
+  }
+  if p < hi and textutil.byte_at(b, p) == 46 {
+    p = p + 1
+    var scale: Float = 0.1
+    while p < hi and textutil.is_digit(textutil.byte_at(b, p)) {
+      v = v + scale * to_float(textutil.byte_at(b, p) - 48)
+      scale = scale / 10.0
+      p = p + 1
+      digits = digits + 1
+    }
+  }
+  if digits == 0 {
+    return Num { ok: false, v: 0.0, pos: p }
+  }
+  if p < hi and (textutil.byte_at(b, p) == 101 or textutil.byte_at(b, p) == 69) {
+    var q2: Int = p + 1
+    var eneg: Bool = false
+    if textutil.byte_at(b, q2) == 45 {
+      eneg = true
+      q2 = q2 + 1
+    } else if textutil.byte_at(b, q2) == 43 {
+      q2 = q2 + 1
+    }
+    var e: Int = 0
+    var ed: Int = 0
+    while q2 < hi and textutil.is_digit(textutil.byte_at(b, q2)) {
+      e = e * 10 + textutil.byte_at(b, q2) - 48
+      q2 = q2 + 1
+      ed = ed + 1
+    }
+    if ed > 0 {
+      if eneg {
+        v = v * pow10f(0 - e)
+      } else {
+        v = v * pow10f(e)
+      }
+      p = q2
+    }
+  }
+  if neg {
+    return Num { ok: true, v: 0.0 - v, pos: p }
+  }
+  return Num { ok: true, v: v, pos: p }
+}
+
+fn is_vertex_at(b: Bytes, p: Int) -> Bool {
+  return textutil.lower_byte(textutil.byte_at(b, p)) == 118 and textutil.lower_byte(textutil.byte_at(b, p + 1)) == 101 and textutil.lower_byte(textutil.byte_at(b, p + 2)) == 114 and textutil.lower_byte(textutil.byte_at(b, p + 3)) == 116 and textutil.lower_byte(textutil.byte_at(b, p + 4)) == 101 and textutil.lower_byte(textutil.byte_at(b, p + 5)) == 120
+}
+
+fn ascii_leaf(b: Bytes, lo: Int, hi: Int) -> Chunk {
+  var t: Text = ""
+  var bx: csg.Box3 = csg.empty_box()
+  var nv: Int = 0
+  var p: Int = lo
+  while p < hi {
+    if is_vertex_at(b, p) {
+      let x: Num = scan_num(b, p + 6, hi)
+      let y: Num = scan_num(b, x.pos, hi)
+      let z: Num = scan_num(b, y.pos, hi)
+      if x.ok and y.ok and z.ok {
+        bx = csg.add_point(bx, x.v, y.v, z.v)
+        let part: Text = to_text(q(x.v)) + "," + to_text(q(y.v)) + "," + to_text(q(z.v))
+        if t == "" {
+          t = part
+        } else {
+          t = t + "," + part
+        }
+        nv = nv + 1
+      }
+      p = z.pos
+    } else {
+      p = p + 1
+    }
+  }
+  return Chunk { t: t, b: bx, nv: nv }
+}
+
+# First index after a newline at or after i (or hi): a safe split point.
+fn line_after(b: Bytes, i: Int, hi: Int) -> Int {
+  var p: Int = i
+  while p < hi and textutil.byte_at(b, p) != 10 {
+    p = p + 1
+  }
+  if p < hi {
+    return p + 1
+  }
+  return hi
+}
+
+fn ascii_range(b: Bytes, lo: Int, hi: Int) -> Chunk {
+  if hi - lo > 6000 {
+    let mid: Int = line_after(b, (lo + hi) / 2, hi)
+    if mid > lo and mid < hi {
+      return join_chunks(ascii_range(b, lo, mid), ascii_range(b, mid, hi))
+    }
+  }
+  return ascii_leaf(b, lo, hi)
+}
+
+fn ascii_stl() -> Text {
+  return "solid t\n facet normal 0 0 1\n  outer loop\n   vertex 0 0 0\n   vertex 1.5e1 0 0\n   vertex 0 10 -2.5\n  endloop\n endfacet\nendsolid t\n"
+}
+
+# Parse an STL file (binary or ASCII) into a triangle soup.
+fn decode_stl(b: Bytes) -> Result[Decoded, Text] {
+  example decode_stl(text_to_bytes("")) == Err("This file is empty.")
+  example decode_stl(text_to_bytes("hello there, not a mesh")) == Err("This does not look like an STL file.")
+  example decode_stl(text_to_bytes("solid empty\nendsolid empty\n")) == Err("This STL file contains no triangles.")
+  example decode_ok(ascii_stl())
+  example decode_data(ascii_stl()) == "0,0,0,150000,0,0,0,100000,-25000"
+
+  let n: Int = len(b)
+  if n == 0 {
+    return Err("This file is empty.")
+  }
+  if n >= 84 {
+    let count: Int = u32(b, 80)
+    if 84 + 50 * count == n {
+      if count == 0 {
+        return Err("This STL file contains no triangles.")
+      }
+      let c: Chunk = bin_tris(b, pow2_table(), 0, count)
+      return Ok(Decoded { kind: "binary", tris: count, data: c.t, b: c.b, bad: 0 })
+    }
+  }
+  if textutil.starts_with(skip_lead(b), "solid") {
+    let ca: Chunk = ascii_range(b, 0, n)
+    if ca.nv == 0 {
+      return Err("This STL file contains no triangles.")
+    }
+    if ca.nv % 3 != 0 {
+      return Err("This STL file is damaged: its corner count is not a multiple of three.")
+    }
+    return Ok(Decoded { kind: "ascii", tris: ca.nv / 3, data: ca.t, b: ca.b, bad: 0 })
+  }
+  return Err("This does not look like an STL file.")
+}
+
+# The first bytes of a file as Text (for the "solid" check), "" if binary.
+fn skip_lead(b: Bytes) -> Text {
+  var t: Text = ""
+  var i: Int = 0
+  while i < len(b) and textutil.is_space(textutil.byte_at(b, i)) {
+    i = i + 1
+  }
+  var k: Int = 0
+  while k < 5 {
+    t = t + textutil.ascii_char(textutil.lower_byte(textutil.byte_at(b, i + k)))
+    k = k + 1
+  }
+  return t
+}
+
+fn decode_ok(t: Text) -> Bool {
+  match decode_stl(text_to_bytes(t)) {
+    Ok(d) -> {
+      return d.tris == 1 and d.kind == "ascii"
+    }
+    Err(e) -> {
+      return false
+    }
+  }
+}
+
+fn decode_data(t: Text) -> Text {
+  match decode_stl(text_to_bytes(t)) {
+    Ok(d) -> {
+      return d.data
+    }
+    Err(e) -> {
+      return e
+    }
+  }
+}

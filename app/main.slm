@@ -1,0 +1,113 @@
+# PrintForge — easy 3D design for 3D printing, written in Solemn.
+#
+#   printforge                 open the app window (WKWebView on macOS,
+#                              WebKitGTK on Linux)
+#   printforge --serve [port]  serve the same app to a browser on
+#                              http://localhost:<port> (default 8765)
+#
+# The window and the browser run the same page and talk to the same typed
+# handler (bridge.handle); in serve mode the page posts to /call?name=<op>.
+
+import "assets.slm"
+import "bridge.slm"
+import "jsonx.slm"
+
+fn port_of(xs: List[Text]) -> Int {
+  example port_of(["--serve"]) == 8765
+  example port_of(["--serve", "9000"]) == 9000
+  example port_of(["--serve", "zzz"]) == 8765
+
+  match get(xs, 1) {
+    Some(t) -> {
+      match to_int(t) {
+        Some(p) -> {
+          return p
+        }
+        None -> {
+          return 8765
+        }
+      }
+    }
+    None -> {
+      return 8765
+    }
+  }
+}
+
+fn wants_serve(xs: List[Text]) -> Bool {
+  example wants_serve(["--serve"])
+  example not wants_serve([])
+  example not wants_serve(["-psn_0_1234"])
+
+  match get(xs, 0) {
+    Some(t) -> {
+      return t == "--serve"
+    }
+    None -> {
+      return false
+    }
+  }
+}
+
+fn headers(ctype: Text) -> Map[Text, Text] {
+  let m: Map[Text, Text] = empty_map()
+  return map_put(map_put(m, "content-type", ctype), "cache-control", "no-store")
+}
+
+fn http(req: Request) -> Response uses env, fs, ffi {
+  match req {
+    Request(method, path, query, hs, body) -> {
+      if method == "GET" and path == "/" {
+        return Response(200, headers("text/html; charset=utf-8"), assets.page())
+      }
+      if method == "POST" and path == "/call" {
+        match map_get(query, "name") {
+          Some(name) -> {
+            var args: Json = JNull
+            match json_parse(body) {
+              Ok(j) -> {
+                args = j
+              }
+              Err(e) -> {
+                args = JNull
+              }
+            }
+            return Response(200, headers("application/json"), json_render(bridge.handle(name, args)))
+          }
+          None -> {
+            return Response(400, headers("application/json"), json_render(jsonx.fail("missing name")))
+          }
+        }
+      }
+      return Response(404, headers("text/plain"), "not found")
+    }
+  }
+}
+
+fn main() -> Unit uses env, fs, ffi, io, net, ui {
+  let xs: List[Text] = args()
+  if wants_serve(xs) {
+    let port: Int = port_of(xs)
+    print("PrintForge is running at http://localhost:" + to_text(port) + "/  (Ctrl+C to stop)")
+    match serve(port, http) {
+      Ok(u) -> {
+        return
+      }
+      Err(e) -> {
+        print("could not start the server: " + e)
+        exit(1)
+      }
+    }
+    return
+  }
+  match webview_run("PrintForge", 1360, 860, assets.page(), bridge.handle) {
+    Ok(u) -> {
+      return
+    }
+    Err(e) -> {
+      print("PrintForge could not open its window: " + e)
+      print("Tip: run `printforge --serve` and open http://localhost:8765 in a browser.")
+      exit(1)
+    }
+  }
+}

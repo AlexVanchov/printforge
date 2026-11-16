@@ -1,0 +1,110 @@
+diff --git a/runtime/vendor/webview/webview_macos.m b/runtime/vendor/webview/webview_macos.m
+index a5c8942..c5f1cc9 100644
+--- a/runtime/vendor/webview/webview_macos.m
++++ b/runtime/vendor/webview/webview_macos.m
+@@ -39,6 +39,70 @@
+ @interface SolWvDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate>
+ @end
+ 
++/* A standard macOS menu bar. Without one, AppKit routes no key equivalents:
++ * Cmd+Q, Cmd+W, Cmd+M and the Edit shortcuts (Cmd+C/V/X/A/Z inside text
++ * fields of the page) would all be dead. Edit actions go down the responder
++ * chain to the WKWebView, which forwards them to the page. */
++static NSMenuItem *sol_wv_item(NSMenu *menu, NSString *title, SEL action,
++                               NSString *key, NSEventModifierFlags mods) {
++  NSMenuItem *it = [menu addItemWithTitle:title action:action keyEquivalent:key];
++  it.keyEquivalentModifierMask = mods;
++  return it;
++}
++
++static void sol_wv_build_menu(NSString *appName) {
++  NSMenu *bar = [[NSMenu alloc] init];
++  NSEventModifierFlags cmd = NSEventModifierFlagCommand;
++
++  NSMenuItem *appItem = [[NSMenuItem alloc] init];
++  [bar addItem:appItem];
++  NSMenu *appMenu = [[NSMenu alloc] initWithTitle:appName];
++  sol_wv_item(appMenu, [@"About " stringByAppendingString:appName],
++              @selector(orderFrontStandardAboutPanel:), @"", 0);
++  [appMenu addItem:[NSMenuItem separatorItem]];
++  sol_wv_item(appMenu, [@"Hide " stringByAppendingString:appName],
++              @selector(hide:), @"h", cmd);
++  sol_wv_item(appMenu, @"Hide Others", @selector(hideOtherApplications:),
++              @"h", cmd | NSEventModifierFlagOption);
++  sol_wv_item(appMenu, @"Show All", @selector(unhideAllApplications:), @"", 0);
++  [appMenu addItem:[NSMenuItem separatorItem]];
++  sol_wv_item(appMenu, [@"Quit " stringByAppendingString:appName],
++              @selector(terminate:), @"q", cmd);
++  appItem.submenu = appMenu;
++
++  NSMenuItem *editItem = [[NSMenuItem alloc] init];
++  [bar addItem:editItem];
++  NSMenu *edit = [[NSMenu alloc] initWithTitle:@"Edit"];
++  sol_wv_item(edit, @"Undo", NSSelectorFromString(@"undo:"), @"z", cmd);
++  sol_wv_item(edit, @"Redo", NSSelectorFromString(@"redo:"), @"z",
++              cmd | NSEventModifierFlagShift);
++  [edit addItem:[NSMenuItem separatorItem]];
++  sol_wv_item(edit, @"Cut", @selector(cut:), @"x", cmd);
++  sol_wv_item(edit, @"Copy", @selector(copy:), @"c", cmd);
++  sol_wv_item(edit, @"Paste", @selector(paste:), @"v", cmd);
++  sol_wv_item(edit, @"Select All", @selector(selectAll:), @"a", cmd);
++  editItem.submenu = edit;
++
++  NSMenuItem *viewItem = [[NSMenuItem alloc] init];
++  [bar addItem:viewItem];
++  NSMenu *view = [[NSMenu alloc] initWithTitle:@"View"];
++  sol_wv_item(view, @"Enter Full Screen", @selector(toggleFullScreen:), @"f",
++              cmd | NSEventModifierFlagControl);
++  viewItem.submenu = view;
++
++  NSMenuItem *winItem = [[NSMenuItem alloc] init];
++  [bar addItem:winItem];
++  NSMenu *win = [[NSMenu alloc] initWithTitle:@"Window"];
++  sol_wv_item(win, @"Minimize", @selector(performMiniaturize:), @"m", cmd);
++  sol_wv_item(win, @"Zoom", @selector(performZoom:), @"", 0);
++  [win addItem:[NSMenuItem separatorItem]];
++  sol_wv_item(win, @"Close Window", @selector(performClose:), @"w", cmd);
++  winItem.submenu = win;
++
++  [NSApp setMainMenu:bar];
++  [NSApp setWindowsMenu:win];
++}
++
+ @implementation SolWvDelegate
+ - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)s {
+   (void)s;
+@@ -92,22 +156,33 @@ int sol_wv_run(const char *title, int width, int height, const char *html,
+                                      name:@"solemn"];
+     cfg.userContentController = ucc;
+ 
+-    NSRect frame = NSMakeRect(0, 0, width, height);
++    /* Never open larger than the screen we are on. */
++    NSRect vis = [[NSScreen mainScreen] visibleFrame];
++    CGFloat w = width, h = height;
++    if (vis.size.width > 0 && w > vis.size.width * 0.96) w = vis.size.width * 0.96;
++    if (vis.size.height > 0 && h > vis.size.height * 0.94) h = vis.size.height * 0.94;
++    NSRect frame = NSMakeRect(0, 0, w, h);
+     NSWindow *win = [[NSWindow alloc]
+         initWithContentRect:frame
+                   styleMask:(NSWindowStyleMaskTitled |
+                              NSWindowStyleMaskClosable |
++                             NSWindowStyleMaskMiniaturizable |
+                              NSWindowStyleMaskResizable)
+                     backing:NSBackingStoreBuffered
+                       defer:NO];
+     if (win == nil) return 2;
+     win.delegate = del;
+     win.title = [NSString stringWithUTF8String:title];
++    win.contentMinSize = NSMakeSize(900, 600);
++    win.collectionBehavior = NSWindowCollectionBehaviorFullScreenPrimary;
++    sol_wv_build_menu(win.title);
+     WKWebView *wv = [[WKWebView alloc] initWithFrame:frame configuration:cfg];
+     if (wv == nil) return 2;
+     win.contentView = wv;
+     [wv loadHTMLString:[NSString stringWithUTF8String:html] baseURL:nil];
+     [win center];
++    /* Remember the window's size and position between launches. */
++    [win setFrameAutosaveName:[@"SolemnWebview-" stringByAppendingString:win.title]];
+     [win makeKeyAndOrderFront:nil];
+     [app activateIgnoringOtherApps:YES];
+     [app run];

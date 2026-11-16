@@ -1,0 +1,105 @@
+# printers — the printers and filaments PrintForge knows about.
+#
+# Everything here is data with a purpose: bed size drives "fits on the bed",
+# nozzle size drives "walls too thin", the effective volumetric speed drives
+# the time estimate, and density/price drive weight and cost. Unknown ids
+# fall back to a sensible generic profile so a stale settings file can never
+# break the app.
+
+import "jsonx.slm"
+
+type Printer = { id: Text, name: Text, brand: Text, bx: Float, by: Float, bz: Float, nozzle: Float, flow: Float }
+
+type Material = { id: Text, name: Text, density: Float, price: Float, nozzle_temp: Int, bed_temp: Int, clearance: Float, note: Text }
+
+fn p(id: Text, brand: Text, name: Text, bx: Float, by: Float, bz: Float, flow: Float) -> Printer {
+  return Printer { id: id, name: name, brand: brand, bx: bx, by: by, bz: bz, nozzle: 0.4, flow: flow }
+}
+
+fn all_printers() -> List[Printer] {
+  example len(all_printers()) == 19
+
+  return [p("bambu_a1", "Bambu Lab", "A1", 256.0, 256.0, 256.0, 11.0), p("bambu_a1_mini", "Bambu Lab", "A1 mini", 180.0, 180.0, 180.0, 10.0), p("bambu_p1s", "Bambu Lab", "P1S / P1P", 256.0, 256.0, 256.0, 12.0), p("bambu_x1c", "Bambu Lab", "X1 Carbon", 256.0, 256.0, 256.0, 12.0), p("bambu_h2d", "Bambu Lab", "H2D", 325.0, 320.0, 325.0, 13.0), p("prusa_mk4s", "Prusa", "MK4S / MK4", 250.0, 210.0, 220.0, 9.0), p("prusa_core_one", "Prusa", "CORE One", 250.0, 220.0, 270.0, 10.0), p("prusa_mini", "Prusa", "MINI+", 180.0, 180.0, 180.0, 6.0), p("prusa_xl", "Prusa", "XL", 360.0, 360.0, 360.0, 9.0), p("creality_ender3_v3_se", "Creality", "Ender-3 V3 SE", 220.0, 220.0, 250.0, 7.0), p("creality_ender3_v2", "Creality", "Ender-3 / V2 / Pro", 220.0, 220.0, 250.0, 4.0), p("creality_k1c", "Creality", "K1 / K1C", 220.0, 220.0, 250.0, 11.0), p("creality_k2_plus", "Creality", "K2 Plus", 350.0, 350.0, 350.0, 12.0), p("elegoo_neptune4", "Elegoo", "Neptune 4 / 4 Pro", 225.0, 225.0, 265.0, 9.0), p("anycubic_kobra3", "Anycubic", "Kobra 3", 250.0, 250.0, 260.0, 9.0), p("sovol_sv06", "Sovol", "SV06", 220.0, 220.0, 250.0, 6.0), p("generic_small", "Generic", "Small printer (180 mm)", 180.0, 180.0, 180.0, 5.0), p("generic_medium", "Generic", "Medium printer (220 mm)", 220.0, 220.0, 250.0, 6.0), p("generic_large", "Generic", "Large printer (300 mm)", 300.0, 300.0, 400.0, 8.0)]
+}
+
+fn default_printer() -> Printer {
+  return p("generic_medium", "Generic", "Medium printer (220 mm)", 220.0, 220.0, 250.0, 6.0)
+}
+
+fn printer(id: Text) -> Printer {
+  example printer("prusa_mk4s").by == 210.0
+  example printer("nope").id == "generic_medium"
+
+  for pr in all_printers() {
+    if pr.id == id {
+      return pr
+    }
+  }
+  return default_printer()
+}
+
+fn m(id: Text, name: Text, density: Float, price: Float, nt: Int, bt: Int, clearance: Float, note: Text) -> Material {
+  return Material { id: id, name: name, density: density, price: price, nozzle_temp: nt, bed_temp: bt, clearance: clearance, note: note }
+}
+
+fn all_materials() -> List[Material] {
+  example len(all_materials()) == 7
+
+  return [m("pla", "PLA", 1.24, 20.0, 210, 60, 0.2, "Easiest to print. Great for most things that stay indoors."), m("petg", "PETG", 1.27, 22.0, 240, 80, 0.25, "Tougher and more heat resistant than PLA. Good for functional parts."), m("abs", "ABS", 1.04, 22.0, 250, 100, 0.3, "Heat resistant but warps. Needs an enclosed printer."), m("asa", "ASA", 1.07, 26.0, 255, 100, 0.3, "Like ABS but UV resistant, good for outdoor parts. Needs an enclosure."), m("tpu", "TPU (flexible)", 1.21, 30.0, 225, 50, 0.3, "Rubber-like and flexible. Print slowly."), m("pa", "Nylon (PA)", 1.14, 40.0, 260, 90, 0.3, "Very strong and tough. Keep the filament dry."), m("pla_cf", "PLA-CF", 1.3, 30.0, 220, 60, 0.2, "Stiff carbon-fibre PLA with a matte look. Needs a hardened nozzle.")]
+}
+
+fn material(id: Text) -> Material {
+  example material("petg").density == 1.27
+  example material("unobtainium").id == "pla"
+
+  for mt in all_materials() {
+    if mt.id == id {
+      return mt
+    }
+  }
+  return m("pla", "PLA", 1.24, 20.0, 210, 60, 0.2, "Easiest to print. Great for most things that stay indoors.")
+}
+
+fn printer_json(pr: Printer) -> Json {
+  example jsonx.num(printer_json(printer("bambu_a1")), "bx", 0.0) == 256.0
+
+  var j: Json = jsonx.obj()
+  j = jsonx.putt(j, "id", pr.id)
+  j = jsonx.putt(j, "name", pr.name)
+  j = jsonx.putt(j, "brand", pr.brand)
+  j = jsonx.putn(j, "bx", pr.bx)
+  j = jsonx.putn(j, "by", pr.by)
+  j = jsonx.putn(j, "bz", pr.bz)
+  j = jsonx.putn(j, "nozzle", pr.nozzle)
+  return j
+}
+
+fn material_json(mt: Material) -> Json {
+  example jsonx.text(material_json(material("tpu")), "name", "") == "TPU (flexible)"
+
+  var j: Json = jsonx.obj()
+  j = jsonx.putt(j, "id", mt.id)
+  j = jsonx.putt(j, "name", mt.name)
+  j = jsonx.putn(j, "density", mt.density)
+  j = jsonx.putn(j, "price", mt.price)
+  j = jsonx.putn(j, "nozzle_temp", to_float(mt.nozzle_temp))
+  j = jsonx.putn(j, "bed_temp", to_float(mt.bed_temp))
+  j = jsonx.putn(j, "clearance", mt.clearance)
+  j = jsonx.putt(j, "note", mt.note)
+  return j
+}
+
+fn catalog_json() -> Json {
+  example len(jsonx.items(catalog_json(), "printers")) == 19
+  example len(jsonx.items(catalog_json(), "materials")) == 7
+
+  var ps: List[Json] = []
+  for pr in all_printers() {
+    ps = push(ps, printer_json(pr))
+  }
+  var ms: List[Json] = []
+  for mt in all_materials() {
+    ms = push(ms, material_json(mt))
+  }
+  return jsonx.put(jsonx.put(jsonx.obj(), "printers", JList(ps)), "materials", JList(ms))
+}

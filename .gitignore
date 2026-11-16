@@ -1,0 +1,7 @@
+node_modules/
+build/
+dist/
+app/assets.slm
+app/main
+*.log
+.DS_Store

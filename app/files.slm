@@ -1,0 +1,469 @@
+# files — the effectful shell around the file system and the OS.
+#
+# Pure decisions (paths, names, which entries to show, project validation)
+# carry examples; the few functions that touch the disk or the OS declare
+# their effects. Three libc calls are bound through `extern fn` (the `ffi`
+# effect): mkdir (Solemn has no directory-creation builtin), setenv + system
+# (to hand a file to the OS "open" command — the path travels in an
+# environment variable, so no shell quoting of user file names is needed).
+
+import "jsonx.slm"
+import "textutil.slm"
+
+extern fn mkdir(path: Text, mode: Int) -> Int uses ffi from "sys/stat.h"
+
+extern fn setenv(name: Text, value: Text, overwrite: Int) -> Int uses ffi from "stdlib.h"
+
+extern fn system(cmd: Text) -> Int uses ffi from "stdlib.h"
+
+fn join(dir: Text, name: Text) -> Text {
+  example join("/home/a", "b.stl") == "/home/a/b.stl"
+  example join("/home/a/", "b.stl") == "/home/a/b.stl"
+  example join("", "b.stl") == "b.stl"
+
+  if dir == "" {
+    return name
+  }
+  if textutil.ends_with_ci(dir, "/") {
+    return dir + name
+  }
+  return dir + "/" + name
+}
+
+fn home() -> Text uses env {
+  match env_var("HOME") {
+    Some(h) -> {
+      if h != "" {
+        return h
+      }
+      return "/tmp"
+    }
+    None -> {
+      return "/tmp"
+    }
+  }
+}
+
+fn is_dir(path: Text) -> Bool uses fs {
+  match list_dir(path) {
+    Ok(xs) -> {
+      return true
+    }
+    Err(e) -> {
+      return false
+    }
+  }
+}
+
+fn is_mac() -> Bool uses env, fs {
+  return is_dir(join(home(), "Library/Application Support"))
+}
+
+fn ensure_dir(path: Text) -> Bool uses fs, ffi {
+  if is_dir(path) {
+    return true
+  }
+  let rc: Int = mkdir(path, 493)
+  return is_dir(path)
+}
+
+fn config_dir() -> Text uses env, fs, ffi {
+  if is_mac() {
+    let d: Text = join(home(), "Library/Application Support/PrintForge")
+    let made: Bool = ensure_dir(d)
+    return d
+  }
+  let cfg: Text = join(home(), ".config")
+  let made1: Bool = ensure_dir(cfg)
+  let d2: Text = join(cfg, "printforge")
+  let made2: Bool = ensure_dir(d2)
+  return d2
+}
+
+fn documents_dir() -> Text uses env, fs {
+  let d: Text = join(home(), "Documents")
+  if is_dir(d) {
+    return d
+  }
+  return home()
+}
+
+# ~/Documents/PrintForge, created on first use.
+fn projects_dir() -> Text uses env, fs, ffi {
+  let d: Text = join(documents_dir(), "PrintForge")
+  if ensure_dir(d) {
+    return d
+  }
+  return documents_dir()
+}
+
+fn settings_path() -> Text uses env, fs, ffi {
+  return join(config_dir(), "settings.json")
+}
+
+fn default_settings() -> Json {
+  example jsonx.text(default_settings(), "units", "") == "mm"
+
+  var s: Json = jsonx.obj()
+  s = jsonx.putt(s, "units", "mm")
+  s = jsonx.putt(s, "printer", "bambu_a1")
+  s = jsonx.putt(s, "material", "pla")
+  s = jsonx.putn(s, "infill", 15.0)
+  s = jsonx.putn(s, "layer", 0.2)
+  s = jsonx.putn(s, "walls", 2.0)
+  s = jsonx.putn(s, "grid", 1.0)
+  s = jsonx.putb(s, "welcomed", false)
+  s = jsonx.putt(s, "export_dir", "")
+  s = jsonx.putb(s, "edges", true)
+  s = jsonx.put(s, "recent", jsonx.texts([]))
+  return s
+}
+
+# Overlay the stored keys on the defaults (unknown keys are dropped, wrong
+# types fall back to the default) — an old or hand-edited settings file can
+# never break the app.
+fn merge_settings(stored: Json) -> Json {
+  example jsonx.text(merge_settings(jsonx.putt(jsonx.obj(), "units", "in")), "units", "") == "in"
+  example jsonx.text(merge_settings(jsonx.putn(jsonx.obj(), "units", 3.0)), "units", "") == "mm"
+  example jsonx.num(merge_settings(JNull), "infill", 0.0) == 15.0
+  example jsonx.field(merge_settings(jsonx.putt(jsonx.obj(), "evil", "x")), "evil") == None
+
+  let d: Json = default_settings()
+  var out: Json = jsonx.obj()
+  out = jsonx.putt(out, "units", jsonx.text(stored, "units", jsonx.text(d, "units", "mm")))
+  out = jsonx.putt(out, "printer", jsonx.text(stored, "printer", jsonx.text(d, "printer", "")))
+  out = jsonx.putt(out, "material", jsonx.text(stored, "material", jsonx.text(d, "material", "")))
+  out = jsonx.putn(out, "infill", jsonx.num(stored, "infill", 15.0))
+  out = jsonx.putn(out, "layer", jsonx.num(stored, "layer", 0.2))
+  out = jsonx.putn(out, "walls", jsonx.num(stored, "walls", 2.0))
+  out = jsonx.putn(out, "grid", jsonx.num(stored, "grid", 1.0))
+  out = jsonx.putb(out, "welcomed", jsonx.boolean(stored, "welcomed", false))
+  out = jsonx.putt(out, "export_dir", jsonx.text(stored, "export_dir", ""))
+  out = jsonx.putb(out, "edges", jsonx.boolean(stored, "edges", true))
+  var recent: List[Text] = []
+  for r in jsonx.items(stored, "recent") {
+    let t: Text = jsonx.text_or(r, "")
+    if t != "" and len(recent) < 8 {
+      recent = push(recent, t)
+    }
+  }
+  out = jsonx.put(out, "recent", jsonx.texts(recent))
+  return out
+}
+
+fn load_settings() -> Json uses env, fs, ffi {
+  match read_file(settings_path()) {
+    Ok(t) -> {
+      match json_parse(t) {
+        Ok(j) -> {
+          return merge_settings(j)
+        }
+        Err(e) -> {
+          return default_settings()
+        }
+      }
+    }
+    Err(e) -> {
+      return default_settings()
+    }
+  }
+}
+
+fn save_settings(s: Json) -> Result[Unit, Text] uses env, fs, ffi {
+  return write_file(settings_path(), json_render(merge_settings(s)))
+}
+
+# Put `path` first in the recent list (no duplicates, at most 8).
+fn add_recent(recent: List[Json], path: Text) -> List[Text] {
+  example add_recent(jsonx.items(jsonx.put(jsonx.obj(), "r", jsonx.texts(["a", "b"])), "r"), "b") == ["b", "a"]
+  example add_recent([], "x") == ["x"]
+
+  var out: List[Text] = [path]
+  for r in recent {
+    let t: Text = jsonx.text_or(r, "")
+    if t != path and t != "" and len(out) < 8 {
+      out = push(out, t)
+    }
+  }
+  return out
+}
+
+fn remember(path: Text) -> Unit uses env, fs, ffi {
+  let s: Json = load_settings()
+  let s2: Json = jsonx.put(s, "recent", jsonx.texts(add_recent(jsonx.items(s, "recent"), path)))
+  match save_settings(s2) {
+    Ok(u) -> {
+      return
+    }
+    Err(e) -> {
+      return
+    }
+  }
+}
+
+fn wanted(name: Text, exts: List[Json]) -> Bool {
+  example wanted("a.STL", [JText(".stl")])
+  example not wanted("a.txt", [JText(".stl")])
+  example wanted("a.txt", [])
+
+  if len(exts) == 0 {
+    return true
+  }
+  for e in exts {
+    if textutil.ends_with_ci(name, jsonx.text_or(e, "")) {
+      return true
+    }
+  }
+  return false
+}
+
+# Folders first, then files matching the wanted extensions; hidden entries
+# (dot files) are skipped.
+fn listing(dir: Text, exts: List[Json]) -> Json uses fs {
+  match list_dir(dir) {
+    Ok(names) -> {
+      var dirs: List[Json] = []
+      var files: List[Json] = []
+      for nm in names {
+        if not textutil.starts_with(nm, ".") {
+          let full: Text = join(dir, nm)
+          if wanted(nm, exts) and not textutil.ends_with_ci(nm, ".app") and has_ext(nm) and not is_dir(full) {
+            files = push(files, jsonx.putb(jsonx.putt(jsonx.obj(), "name", nm), "dir", false))
+          } else if is_dir(full) {
+            dirs = push(dirs, jsonx.putb(jsonx.putt(jsonx.obj(), "name", nm), "dir", true))
+          }
+        }
+      }
+      var all: List[Json] = dirs
+      for f in files {
+        all = push(all, f)
+      }
+      return jsonx.ok(jsonx.put(jsonx.putt(jsonx.obj(), "dir", dir), "entries", JList(all)))
+    }
+    Err(e) -> {
+      return jsonx.fail(friendly_fs_error(e))
+    }
+  }
+}
+
+fn has_ext(name: Text) -> Bool {
+  example has_ext("a.stl")
+  example not has_ext("Folder")
+
+  return textutil.contains_byte(name, 46)
+}
+
+fn friendly_fs_error(e: Text) -> Text {
+  example friendly_fs_error("not found") == "That file or folder does not exist."
+
+  if e == "not found" {
+    return "That file or folder does not exist."
+  }
+  if e == "permission denied" {
+    return "PrintForge is not allowed to open that location. Check the folder permissions (on macOS: System Settings > Privacy & Security > Files and Folders)."
+  }
+  if e == "is a directory" {
+    return "That is a folder, not a file."
+  }
+  if e == "not valid UTF-8" {
+    return "That file is not a text file PrintForge understands."
+  }
+  return "Something went wrong reading or writing the file (" + e + ")."
+}
+
+fn places() -> Json uses env, fs, ffi {
+  var j: Json = jsonx.obj()
+  j = jsonx.putt(j, "home", home())
+  j = jsonx.putt(j, "projects", projects_dir())
+  let desk: Text = join(home(), "Desktop")
+  if is_dir(desk) {
+    j = jsonx.putt(j, "desktop", desk)
+  }
+  j = jsonx.putt(j, "documents", documents_dir())
+  let dl: Text = join(home(), "Downloads")
+  if is_dir(dl) {
+    j = jsonx.putt(j, "downloads", dl)
+  }
+  return j
+}
+
+fn exists(path: Text) -> Bool uses fs {
+  match read_file_bytes(path) {
+    Ok(b) -> {
+      return true
+    }
+    Err(e) -> {
+      return e == "permission denied" or e == "is a directory"
+    }
+  }
+}
+
+fn write_text(path: Text, content: Text) -> Json uses fs {
+  match write_file(path, content) {
+    Ok(u) -> {
+      return jsonx.ok(jsonx.putn(jsonx.putt(jsonx.obj(), "path", path), "bytes", to_float(len(text_to_bytes(content)))))
+    }
+    Err(e) -> {
+      return jsonx.fail(friendly_fs_error(e))
+    }
+  }
+}
+
+# Hand a file to the OS: open it with its default app (usually the slicer)
+# or reveal it in Finder / the file manager.
+fn os_open(path: Text, reveal: Bool) -> Json uses env, fs, ffi {
+  if not exists(path) {
+    return jsonx.fail("The file is not there any more.")
+  }
+  let set: Int = setenv("PRINTFORGE_TARGET", path, 1)
+  var cmd: Text = ""
+  if is_mac() {
+    if reveal {
+      cmd = "open -R \"$PRINTFORGE_TARGET\""
+    } else {
+      cmd = "open \"$PRINTFORGE_TARGET\""
+    }
+  } else {
+    if reveal {
+      cmd = "xdg-open \"$(dirname \"$PRINTFORGE_TARGET\")\" >/dev/null 2>&1 &"
+    } else {
+      cmd = "xdg-open \"$PRINTFORGE_TARGET\" >/dev/null 2>&1 &"
+    }
+  }
+  let rc: Int = system(cmd)
+  if rc == 0 {
+    return jsonx.ok(jsonx.obj())
+  }
+  if reveal {
+    return jsonx.fail("Could not show the file.")
+  }
+  return jsonx.fail("No app is set to open this kind of file. Open it from your slicer instead.")
+}
+
+# Open a slicer by its macOS app name with the file.
+fn open_with(app: Text, path: Text) -> Json uses env, fs, ffi {
+  if not exists(path) {
+    return jsonx.fail("The file is not there any more.")
+  }
+  let s1: Int = setenv("PRINTFORGE_TARGET", path, 1)
+  let s2: Int = setenv("PRINTFORGE_APP", app, 1)
+  let rc: Int = system("open -a \"$PRINTFORGE_APP\" \"$PRINTFORGE_TARGET\"")
+  if rc == 0 {
+    return jsonx.ok(jsonx.obj())
+  }
+  return jsonx.fail(app + " is not installed.")
+}
+
+# ---- project files ------------------------------------------------------------
+
+fn project_ext() -> Text {
+  return ".pforge"
+}
+
+# A saved project must say it is one; future versions are refused politely.
+fn check_project(j: Json) -> Result[Json, Text] {
+  example check_project(jsonx.putt(jsonx.obj(), "app", "Other")) == Err("This is not a PrintForge project.")
+  example check_project(jsonx.putn(jsonx.putt(jsonx.obj(), "app", "PrintForge"), "version", 9.0)) == Err("This project was made with a newer PrintForge. Please update the app.")
+
+  if jsonx.text(j, "app", "") != "PrintForge" {
+    return Err("This is not a PrintForge project.")
+  }
+  if jsonx.num(j, "version", 1.0) > 1.0 {
+    return Err("This project was made with a newer PrintForge. Please update the app.")
+  }
+  match jsonx.field(j, "objects") {
+    Some(o) -> {
+      match o {
+        JList(xs) -> {
+          return Ok(j)
+        }
+        _ -> {
+          return Err("This project file is damaged (no objects list).")
+        }
+      }
+    }
+    None -> {
+      return Err("This project file is damaged (no objects list).")
+    }
+  }
+}
+
+fn load_project(path: Text) -> Json uses env, fs, ffi {
+  match read_file(path) {
+    Ok(t) -> {
+      match json_parse(t) {
+        Ok(j) -> {
+          match check_project(j) {
+            Ok(doc) -> {
+              remember(path)
+              return jsonx.ok(jsonx.putt(jsonx.put(jsonx.obj(), "doc", doc), "path", path))
+            }
+            Err(e) -> {
+              return jsonx.fail(e)
+            }
+          }
+        }
+        Err(e) -> {
+          return jsonx.fail("This project file is damaged (" + e + ").")
+        }
+      }
+    }
+    Err(e) -> {
+      return jsonx.fail(friendly_fs_error(e))
+    }
+  }
+}
+
+fn save_project(path: Text, doc: Json) -> Json uses env, fs, ffi {
+  match check_project(doc) {
+    Ok(d) -> {
+      let r: Json = write_text(path, json_render(d))
+      if jsonx.boolean(r, "ok", false) {
+        remember(path)
+      }
+      return r
+    }
+    Err(e) -> {
+      return jsonx.fail(e)
+    }
+  }
+}
+
+# ---- autosave (crash / accidental-close recovery) --------------------------------
+
+fn autosave_path() -> Text uses env, fs, ffi {
+  return join(config_dir(), "autosave.pforge")
+}
+
+fn autosave_save(doc: Json) -> Json uses env, fs, ffi {
+  return write_text(autosave_path(), json_render(doc))
+}
+
+fn autosave_load() -> Json uses env, fs, ffi {
+  match read_file(autosave_path()) {
+    Ok(t) -> {
+      match json_parse(t) {
+        Ok(j) -> {
+          match check_project(j) {
+            Ok(doc) -> {
+              return jsonx.ok(jsonx.put(jsonx.obj(), "doc", doc))
+            }
+            Err(e) -> {
+              return jsonx.fail("no autosave")
+            }
+          }
+        }
+        Err(e) -> {
+          return jsonx.fail("no autosave")
+        }
+      }
+    }
+    Err(e) -> {
+      return jsonx.fail("no autosave")
+    }
+  }
+}
+
+fn autosave_clear() -> Json uses env, fs, ffi {
+  return write_text(autosave_path(), "{}")
+}

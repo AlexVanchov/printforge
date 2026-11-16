@@ -1,0 +1,354 @@
+# csg — the recipe language every PrintForge shape is written in.
+#
+# A recipe is a small Json tree: primitives (box, cylinder, polygon prism,
+# sphere, torus, text...) combined with union / difference / intersection /
+# hull, each node optionally rotated ("rot", degrees about X then Y then Z)
+# and then moved ("tr"). The page's geometry kernel executes the tree; this
+# module builds trees and — so recipes can be verified by `solemn check`
+# without any geometry kernel — computes their bounding boxes.
+
+import "fmath.slm"
+import "jsonx.slm"
+
+type Box3 = { x0: Float, y0: Float, z0: Float, x1: Float, y1: Float, z1: Float }
+
+fn node(t: Text) -> Json {
+  return jsonx.putt(jsonx.obj(), "t", t)
+}
+
+fn v3j(x: Float, y: Float, z: Float) -> Json {
+  return jsonx.nums([x, y, z])
+}
+
+fn pt(x: Float, y: Float) -> Json {
+  example json_render(pt(1.0, 2.0)) == "[1.0,2.0]"
+
+  return jsonx.nums([x, y])
+}
+
+# Axis-aligned box from (0,0,0) to (sx,sy,sz).
+fn box(sx: Float, sy: Float, sz: Float) -> Json {
+  requires sx > 0.0 and sy > 0.0 and sz > 0.0
+
+  return jsonx.put(node("box"), "s", v3j(sx, sy, sz))
+}
+
+# Box with vertical edges rounded by r.
+fn rbox(sx: Float, sy: Float, sz: Float, r: Float) -> Json {
+  requires sx > 0.0 and sy > 0.0 and sz > 0.0
+
+  let rr: Float = fmath.clampf(r, 0.0, fmath.minf(sx, sy) / 2.0)
+  return jsonx.putn(box(sx, sy, sz), "r", rr)
+}
+
+# Box with every edge rounded by r (a pillow-like block).
+fn sbox(sx: Float, sy: Float, sz: Float, r: Float) -> Json {
+  requires sx > 0.0 and sy > 0.0 and sz > 0.0
+
+  let rr: Float = fmath.clampf(r, 0.0, fmath.minf(sx, fmath.minf(sy, sz)) / 2.0)
+  return jsonx.putn(box(sx, sy, sz), "rall", rr)
+}
+
+# Cylinder/cone standing on z=0 around the Z axis.
+fn cone(r1: Float, r2: Float, h: Float) -> Json {
+  requires h > 0.0 and r1 >= 0.0 and r2 >= 0.0
+
+  var n: Json = node("cyl")
+  n = jsonx.putn(n, "r1", r1)
+  n = jsonx.putn(n, "r2", r2)
+  n = jsonx.putn(n, "h", h)
+  return n
+}
+
+fn cyl(r: Float, h: Float) -> Json {
+  requires h > 0.0 and r > 0.0
+
+  return cone(r, r, h)
+}
+
+# A cylinder with a fixed number of sides (prisms, pyramids, hex holes).
+fn ngon(r1: Float, r2: Float, h: Float, sides: Int) -> Json {
+  requires sides >= 3
+
+  return jsonx.putn(cone(r1, r2, h), "fn", to_float(sides))
+}
+
+fn sphere(r: Float) -> Json {
+  requires r > 0.0
+
+  return jsonx.putn(node("sphere"), "r", r)
+}
+
+fn torus(big: Float, small: Float) -> Json {
+  requires big > small and small > 0.0
+
+  return jsonx.putn(jsonx.putn(node("torus"), "R", big), "r", small)
+}
+
+# A polygon (counter-clockwise points in XY) extruded from z=0 to z=h,
+# optionally scaled toward the top (top = 1.0 for straight walls).
+fn poly(pts: List[Json], h: Float) -> Json {
+  requires h > 0.0 and len(pts) >= 3
+
+  return jsonx.putn(jsonx.put(node("poly"), "pts", JList(pts)), "h", h)
+}
+
+fn poly_taper(pts: List[Json], h: Float, top: Float) -> Json {
+  requires top >= 0.0
+
+  return jsonx.putn(poly(pts, h), "top", top)
+}
+
+# Raised text, centered on the origin, letters `size` mm tall, h mm deep.
+fn text3d(t: Text, size: Float, h: Float) -> Json {
+  requires size > 0.0 and h > 0.0
+
+  return jsonx.putn(jsonx.putn(jsonx.putt(node("text"), "text", t), "size", size), "h", h)
+}
+
+# A rounded plate sized around a text (the page measures the glyphs), with an
+# optional key-ring hole on the left. Centered on the origin.
+fn tag(t: Text, size: Float, pad: Float, r: Float, h: Float, hole: Float) -> Json {
+  var n: Json = jsonx.putt(node("tag"), "text", t)
+  n = jsonx.putn(n, "size", size)
+  n = jsonx.putn(n, "pad", pad)
+  n = jsonx.putn(n, "r", r)
+  n = jsonx.putn(n, "h", h)
+  n = jsonx.putn(n, "hole", hole)
+  return n
+}
+
+fn group(t: Text, children: List[Json]) -> Json {
+  return jsonx.put(node(t), "c", JList(children))
+}
+
+fn union(children: List[Json]) -> Json {
+  return group("union", children)
+}
+
+# `base` minus every node in `cuts`.
+fn diff(base: Json, cuts: List[Json]) -> Json {
+  var all: List[Json] = [base]
+  for c in cuts {
+    all = push(all, c)
+  }
+  return group("diff", all)
+}
+
+fn inter(children: List[Json]) -> Json {
+  return group("inter", children)
+}
+
+fn hull(children: List[Json]) -> Json {
+  return group("hull", children)
+}
+
+fn has(j: Json, key: Text) -> Bool {
+  match jsonx.field(j, key) {
+    Some(v) -> {
+      return true
+    }
+    None -> {
+      return false
+    }
+  }
+}
+
+# Move a node. Translations compose by adding.
+fn at(n: Json, x: Float, y: Float, z: Float) -> Json {
+  example json_render(at(at(box(1.0, 1.0, 1.0), 1.0, 0.0, 0.0), 1.0, 2.0, 3.0)) == "{\"s\":[1.0,1.0,1.0],\"t\":\"box\",\"tr\":[2.0,2.0,3.0]}"
+
+  let cur: List[Json] = jsonx.items(n, "tr")
+  let ox: Float = jsonx.num_at(cur, 0, 0.0)
+  let oy: Float = jsonx.num_at(cur, 1, 0.0)
+  let oz: Float = jsonx.num_at(cur, 2, 0.0)
+  return jsonx.put(n, "tr", v3j(ox + x, oy + y, oz + z))
+}
+
+# Rotate a node (degrees, about X then Y then Z) around the origin. A node
+# that was already moved is wrapped first so the rotation applies last.
+fn rot(n: Json, rx: Float, ry: Float, rz: Float) -> Json {
+  if has(n, "tr") or has(n, "rot") {
+    return jsonx.put(union([n]), "rot", v3j(rx, ry, rz))
+  }
+  return jsonx.put(n, "rot", v3j(rx, ry, rz))
+}
+
+# ---- bounding boxes -------------------------------------------------------
+
+fn empty_box() -> Box3 {
+  return Box3 { x0: 1000000000.0, y0: 1000000000.0, z0: 1000000000.0, x1: -1000000000.0, y1: -1000000000.0, z1: -1000000000.0 }
+}
+
+fn is_empty(b: Box3) -> Bool {
+  return b.x0 > b.x1
+}
+
+fn mk(x0: Float, y0: Float, z0: Float, x1: Float, y1: Float, z1: Float) -> Box3 {
+  return Box3 { x0: x0, y0: y0, z0: z0, x1: x1, y1: y1, z1: z1 }
+}
+
+fn merge(a: Box3, b: Box3) -> Box3 {
+  if is_empty(a) {
+    return b
+  }
+  if is_empty(b) {
+    return a
+  }
+  return mk(fmath.minf(a.x0, b.x0), fmath.minf(a.y0, b.y0), fmath.minf(a.z0, b.z0), fmath.maxf(a.x1, b.x1), fmath.maxf(a.y1, b.y1), fmath.maxf(a.z1, b.z1))
+}
+
+fn intersect(a: Box3, b: Box3) -> Box3 {
+  let r: Box3 = mk(fmath.maxf(a.x0, b.x0), fmath.maxf(a.y0, b.y0), fmath.maxf(a.z0, b.z0), fmath.minf(a.x1, b.x1), fmath.minf(a.y1, b.y1), fmath.minf(a.z1, b.z1))
+  if r.x0 > r.x1 or r.y0 > r.y1 or r.z0 > r.z1 {
+    return empty_box()
+  }
+  return r
+}
+
+fn add_point(b: Box3, x: Float, y: Float, z: Float) -> Box3 {
+  return merge(b, mk(x, y, z, x, y, z))
+}
+
+# Rotate one point by Euler degrees (X, then Y, then Z) and add it.
+fn add_rotated(b: Box3, x: Float, y: Float, z: Float, rx: Float, ry: Float, rz: Float) -> Box3 {
+  let ax: Float = fmath.deg2rad(rx)
+  let ay: Float = fmath.deg2rad(ry)
+  let az: Float = fmath.deg2rad(rz)
+  let y1: Float = y * fmath.cosf(ax) - z * fmath.sinf(ax)
+  let z1: Float = y * fmath.sinf(ax) + z * fmath.cosf(ax)
+  let x2: Float = x * fmath.cosf(ay) + z1 * fmath.sinf(ay)
+  let z2: Float = 0.0 - x * fmath.sinf(ay) + z1 * fmath.cosf(ay)
+  let x3: Float = x2 * fmath.cosf(az) - y1 * fmath.sinf(az)
+  let y3: Float = x2 * fmath.sinf(az) + y1 * fmath.cosf(az)
+  return add_point(b, x3, y3, z2)
+}
+
+fn rotate_box(b: Box3, rx: Float, ry: Float, rz: Float) -> Box3 {
+  if is_empty(b) {
+    return b
+  }
+  var r: Box3 = empty_box()
+  r = add_rotated(r, b.x0, b.y0, b.z0, rx, ry, rz)
+  r = add_rotated(r, b.x1, b.y0, b.z0, rx, ry, rz)
+  r = add_rotated(r, b.x0, b.y1, b.z0, rx, ry, rz)
+  r = add_rotated(r, b.x1, b.y1, b.z0, rx, ry, rz)
+  r = add_rotated(r, b.x0, b.y0, b.z1, rx, ry, rz)
+  r = add_rotated(r, b.x1, b.y0, b.z1, rx, ry, rz)
+  r = add_rotated(r, b.x0, b.y1, b.z1, rx, ry, rz)
+  r = add_rotated(r, b.x1, b.y1, b.z1, rx, ry, rz)
+  return r
+}
+
+fn poly_box(pts: List[Json], h: Float) -> Box3 {
+  var r: Box3 = empty_box()
+  for p in pts {
+    match p {
+      JList(xy) -> {
+        r = add_point(r, jsonx.num_at(xy, 0, 0.0), jsonx.num_at(xy, 1, 0.0), 0.0)
+      }
+      _ -> {
+        r = r
+      }
+    }
+  }
+  if is_empty(r) {
+    return r
+  }
+  return mk(r.x0, r.y0, 0.0, r.x1, r.y1, h)
+}
+
+fn children_box(n: Json, t: Text) -> Box3 {
+  let cs: List[Json] = jsonx.items(n, "c")
+  if t == "diff" {
+    match get(cs, 0) {
+      Some(first) -> {
+        return bbox(first)
+      }
+      None -> {
+        return empty_box()
+      }
+    }
+  }
+  var r: Box3 = empty_box()
+  var started: Bool = false
+  for c in cs {
+    if t == "inter" and started {
+      r = intersect(r, bbox(c))
+    } else {
+      r = merge(r, bbox(c))
+    }
+    started = true
+  }
+  return r
+}
+
+fn raw_box(n: Json) -> Box3 {
+  let t: Text = jsonx.text(n, "t", "")
+  if t == "box" {
+    let s: List[Json] = jsonx.items(n, "s")
+    return mk(0.0, 0.0, 0.0, jsonx.num_at(s, 0, 0.0), jsonx.num_at(s, 1, 0.0), jsonx.num_at(s, 2, 0.0))
+  }
+  if t == "cyl" {
+    let r: Float = fmath.maxf(jsonx.num(n, "r1", 0.0), jsonx.num(n, "r2", 0.0))
+    return mk(0.0 - r, 0.0 - r, 0.0, r, r, jsonx.num(n, "h", 0.0))
+  }
+  if t == "sphere" {
+    let rs: Float = jsonx.num(n, "r", 0.0)
+    return mk(0.0 - rs, 0.0 - rs, 0.0 - rs, rs, rs, rs)
+  }
+  if t == "torus" {
+    let o: Float = jsonx.num(n, "R", 0.0) + jsonx.num(n, "r", 0.0)
+    let tr: Float = jsonx.num(n, "r", 0.0)
+    return mk(0.0 - o, 0.0 - o, 0.0 - tr, o, o, tr)
+  }
+  if t == "poly" {
+    return poly_box(jsonx.items(n, "pts"), jsonx.num(n, "h", 0.0))
+  }
+  if t == "text" {
+    let w: Float = jsonx.num(n, "size", 0.0) * 0.62 * to_float(len(jsonx.text(n, "text", ""))) / 2.0
+    let hh: Float = jsonx.num(n, "size", 0.0) / 2.0
+    return mk(0.0 - w, 0.0 - hh, 0.0, w, hh, jsonx.num(n, "h", 0.0))
+  }
+  if t == "tag" {
+    let ww: Float = jsonx.num(n, "size", 0.0) * 0.62 * to_float(len(jsonx.text(n, "text", ""))) / 2.0 + jsonx.num(n, "pad", 0.0)
+    let th: Float = jsonx.num(n, "size", 0.0) / 2.0 + jsonx.num(n, "pad", 0.0)
+    let extra: Float = jsonx.num(n, "hole", 0.0) * 2.0
+    return mk(0.0 - ww - extra, 0.0 - th, 0.0, ww, th, jsonx.num(n, "h", 0.0))
+  }
+  return children_box(n, t)
+}
+
+# Bounding box of a recipe (exact for everything but text, which is
+# estimated — the page measures real glyphs).
+fn bbox(n: Json) -> Box3 {
+  example dims(box(10.0, 20.0, 30.0)) == [10.0, 20.0, 30.0]
+  example dims(at(cyl(5.0, 10.0), 100.0, 0.0, 0.0)) == [10.0, 10.0, 10.0]
+  example dims(diff(box(10.0, 10.0, 10.0), [at(box(4.0, 4.0, 40.0), 3.0, 3.0, -5.0)])) == [10.0, 10.0, 10.0]
+  example dims(union([box(10.0, 10.0, 10.0), at(box(10.0, 10.0, 10.0), 5.0, 0.0, 0.0)])) == [15.0, 10.0, 10.0]
+  example dims(rot(box(10.0, 20.0, 30.0), 90.0, 0.0, 0.0)) == [10.0, 30.0, 20.0]
+  example dims(at(rot(box(10.0, 20.0, 30.0), 0.0, 0.0, 90.0), 5.0, 5.0, 5.0)) == [20.0, 10.0, 30.0]
+
+  var b: Box3 = raw_box(n)
+  let r: List[Json] = jsonx.items(n, "rot")
+  if len(r) == 3 {
+    b = rotate_box(b, jsonx.num_at(r, 0, 0.0), jsonx.num_at(r, 1, 0.0), jsonx.num_at(r, 2, 0.0))
+  }
+  let tr: List[Json] = jsonx.items(n, "tr")
+  if len(tr) == 3 and not is_empty(b) {
+    let dx: Float = jsonx.num_at(tr, 0, 0.0)
+    let dy: Float = jsonx.num_at(tr, 1, 0.0)
+    let dz: Float = jsonx.num_at(tr, 2, 0.0)
+    b = mk(b.x0 + dx, b.y0 + dy, b.z0 + dz, b.x1 + dx, b.y1 + dy, b.z1 + dz)
+  }
+  return b
+}
+
+# Rounded bounding-box size [x, y, z] (0.001 mm) — handy in examples.
+fn dims(n: Json) -> List[Float] {
+  let b: Box3 = bbox(n)
+  if is_empty(b) {
+    return [0.0, 0.0, 0.0]
+  }
+  return [fmath.roundf((b.x1 - b.x0) * 1000.0) / 1000.0, fmath.roundf((b.y1 - b.y0) * 1000.0) / 1000.0, fmath.roundf((b.z1 - b.z0) * 1000.0) / 1000.0]
+}

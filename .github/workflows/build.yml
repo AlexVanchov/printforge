@@ -1,0 +1,95 @@
+name: build
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  macos:
+    name: macOS app (universal) + tests
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Rust
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+      - name: Install npm packages
+        run: npm ci --no-audit --no-fund
+      - name: Build PrintForge.app, .zip and .dmg
+        run: scripts/build-macos.sh
+      - name: Native self-test (Apple Silicon)
+        run: OUTDIR=dist/selftest scripts/selftest-macos.sh dist/PrintForge.app
+      - name: Native self-test (Intel slice via Rosetta)
+        run: |
+          if arch -x86_64 /usr/bin/true 2>/dev/null; then
+            OUTDIR=dist/selftest scripts/selftest-macos.sh dist/PrintForge.app x86_64
+          else
+            echo "Rosetta not available on this runner; checking the slice instead"
+            lipo -info dist/PrintForge.app/Contents/MacOS/PrintForge | grep x86_64
+          fi
+      - name: Kernel integration test
+        run: PF_BIN=dist/PrintForge.app/Contents/MacOS/PrintForge node tests/node/kernel.test.mjs
+      - name: End-to-end UI test (WebKit = Safari engine)
+        run: |
+          npx playwright install webkit
+          PF_BIN=dist/PrintForge.app/Contents/MacOS/PrintForge node tests/e2e/app.e2e.mjs webkit dist/selftest
+      - name: Verify the DMG mounts and the app inside is signed
+        run: |
+          hdiutil attach -nobrowse -mountpoint /tmp/pfdmg dist/PrintForge-*-macOS.dmg
+          codesign --verify --deep --strict --verbose=2 /tmp/pfdmg/PrintForge.app
+          lipo -info /tmp/pfdmg/PrintForge.app/Contents/MacOS/PrintForge
+          hdiutil detach /tmp/pfdmg
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: PrintForge-macOS
+          path: |
+            dist/*.dmg
+            dist/*.zip
+            dist/selftest/
+          if-no-files-found: warn
+
+  linux:
+    name: Linux build + full test suite
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: System packages
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev xvfb
+      - name: Solemn toolchain
+        run: |
+          git clone -q https://github.com/AlexVanchov/solemn.git build/solemn
+          git -C build/solemn checkout -q fce332dd50e494eda80fa908fd9297a7d1e272bc
+          (cd build/solemn && cargo build --release -q)
+      - run: npm ci --no-audit --no-fund
+      - name: Build (solemn check runs every example clause)
+        run: node tools/build.mjs --solemn build/solemn/target/release/solemn
+      - name: Kernel integration test
+        run: node tests/node/kernel.test.mjs
+      - name: End-to-end UI tests (Chromium + WebKit)
+        run: |
+          npx playwright install --with-deps chromium webkit
+          node tests/e2e/app.e2e.mjs chromium
+          node tests/e2e/app.e2e.mjs webkit
+      - name: Native window self-test (WebKitGTK under Xvfb)
+        run: |
+          H=$(mktemp -d); mkdir -p $H/Documents
+          HOME=$H PRINTFORGE_SELFTEST=1 PRINTFORGE_SELFTEST_LOG=$PWD/selftest-linux.log PRINTFORGE_SELFTEST_DIR=$H/Documents timeout 180 xvfb-run -a -s "-screen 0 1600x1000x24" build/printforge
+          cat selftest-linux.log
+          grep -q "DONE OK" selftest-linux.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: PrintForge-Linux
+          path: |
+            build/printforge
+            selftest-linux.log

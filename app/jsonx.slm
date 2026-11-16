@@ -1,0 +1,261 @@
+# jsonx — small, total helpers for reading and building Json values.
+#
+# Every reader takes a default, so a malformed call from the page can never
+# crash the handler: missing keys and wrong shapes fall back to the default.
+
+fn field(j: Json, key: Text) -> Option[Json] {
+  example field(sample(), "n") == Some(JNum(2.0))
+  example field(sample(), "zz") == None
+  example field(JNull, "n") == None
+
+  match j {
+    JObj(m) -> {
+      return map_get(m, key)
+    }
+    _ -> {
+      return None
+    }
+  }
+}
+
+fn num(j: Json, key: Text, dflt: Float) -> Float {
+  example num(sample(), "n", 0.0) == 2.0
+  example num(sample(), "t", 7.0) == 7.0
+  example num(JNull, "n", 1.5) == 1.5
+
+  match field(j, key) {
+    Some(v) -> {
+      match v {
+        JNum(n) -> {
+          return n
+        }
+        _ -> {
+          return dflt
+        }
+      }
+    }
+    None -> {
+      return dflt
+    }
+  }
+}
+
+fn text(j: Json, key: Text, dflt: Text) -> Text {
+  example text(sample(), "t", "") == "hi"
+  example text(sample(), "n", "x") == "x"
+
+  match field(j, key) {
+    Some(v) -> {
+      match v {
+        JText(t) -> {
+          return t
+        }
+        _ -> {
+          return dflt
+        }
+      }
+    }
+    None -> {
+      return dflt
+    }
+  }
+}
+
+fn boolean(j: Json, key: Text, dflt: Bool) -> Bool {
+  example boolean(sample(), "b", false) == true
+  example boolean(sample(), "n", false) == false
+
+  match field(j, key) {
+    Some(v) -> {
+      match v {
+        JBool(b) -> {
+          return b
+        }
+        _ -> {
+          return dflt
+        }
+      }
+    }
+    None -> {
+      return dflt
+    }
+  }
+}
+
+fn items(j: Json, key: Text) -> List[Json] {
+  example len(items(sample(), "l")) == 3
+  example len(items(sample(), "n")) == 0
+
+  let none: List[Json] = []
+  match field(j, key) {
+    Some(v) -> {
+      match v {
+        JList(xs) -> {
+          return xs
+        }
+        _ -> {
+          return none
+        }
+      }
+    }
+    None -> {
+      return none
+    }
+  }
+}
+
+fn obj_or_empty(j: Json, key: Text) -> Json {
+  example obj_or_empty(sample(), "n") == obj()
+  example obj_or_empty(sample(), "o") == put(obj(), "k", JNum(1.0))
+
+  match field(j, key) {
+    Some(v) -> {
+      match v {
+        JObj(m) -> {
+          return v
+        }
+        _ -> {
+          return obj()
+        }
+      }
+    }
+    None -> {
+      return obj()
+    }
+  }
+}
+
+# The Float at index i of a Json list, or dflt.
+fn num_at(xs: List[Json], i: Int, dflt: Float) -> Float {
+  example num_at([JNum(1.0), JNum(2.0)], 1, 0.0) == 2.0
+  example num_at([JNum(1.0)], 5, -1.0) == -1.0
+  example num_at([JText("a")], 0, -1.0) == -1.0
+
+  match get(xs, i) {
+    Some(v) -> {
+      match v {
+        JNum(n) -> {
+          return n
+        }
+        _ -> {
+          return dflt
+        }
+      }
+    }
+    None -> {
+      return dflt
+    }
+  }
+}
+
+fn num_or(v: Json, dflt: Float) -> Float {
+  example num_or(JNum(3.0), 0.0) == 3.0
+  example num_or(JNull, 9.0) == 9.0
+
+  match v {
+    JNum(n) -> {
+      return n
+    }
+    _ -> {
+      return dflt
+    }
+  }
+}
+
+fn text_or(v: Json, dflt: Text) -> Text {
+  example text_or(JText("a"), "") == "a"
+  example text_or(JNull, "z") == "z"
+
+  match v {
+    JText(t) -> {
+      return t
+    }
+    _ -> {
+      return dflt
+    }
+  }
+}
+
+fn obj() -> Json {
+  example json_render(obj()) == "{}"
+
+  let m: Map[Text, Json] = empty_map()
+  return JObj(m)
+}
+
+# Set key on an object (a non-object becomes a fresh object first).
+fn put(j: Json, key: Text, v: Json) -> Json {
+  example json_render(put(obj(), "a", JNum(1.0))) == "{\"a\":1.0}"
+  example json_render(put(JNull, "a", JBool(true))) == "{\"a\":true}"
+
+  match j {
+    JObj(m) -> {
+      return JObj(map_put(m, key, v))
+    }
+    _ -> {
+      let m0: Map[Text, Json] = empty_map()
+      return JObj(map_put(m0, key, v))
+    }
+  }
+}
+
+fn putn(j: Json, key: Text, v: Float) -> Json {
+  example num(putn(obj(), "x", 2.0), "x", 0.0) == 2.0
+
+  return put(j, key, JNum(v))
+}
+
+fn putt(j: Json, key: Text, v: Text) -> Json {
+  example text(putt(obj(), "x", "y"), "x", "") == "y"
+
+  return put(j, key, JText(v))
+}
+
+fn putb(j: Json, key: Text, v: Bool) -> Json {
+  example boolean(putb(obj(), "x", true), "x", false)
+
+  return put(j, key, JBool(v))
+}
+
+fn nums(xs: List[Float]) -> Json {
+  example json_render(nums([1.0, 2.5])) == "[1.0,2.5]"
+
+  var out: List[Json] = []
+  for x in xs {
+    out = push(out, JNum(x))
+  }
+  return JList(out)
+}
+
+fn texts(xs: List[Text]) -> Json {
+  example json_render(texts(["a", "b"])) == "[\"a\",\"b\"]"
+
+  var out: List[Json] = []
+  for x in xs {
+    out = push(out, JText(x))
+  }
+  return JList(out)
+}
+
+fn ok(payload: Json) -> Json {
+  example json_render(ok(obj())) == "{\"ok\":true}"
+  example json_render(ok(putn(obj(), "v", 1.0))) == "{\"ok\":true,\"v\":1.0}"
+
+  return putb(payload, "ok", true)
+}
+
+fn fail(msg: Text) -> Json {
+  example json_render(fail("nope")) == "{\"error\":\"nope\",\"ok\":false}"
+
+  return putt(putb(obj(), "ok", false), "error", msg)
+}
+
+fn sample() -> Json {
+  var j: Json = obj()
+  j = putn(j, "n", 2.0)
+  j = putt(j, "t", "hi")
+  j = putb(j, "b", true)
+  j = put(j, "l", nums([1.0, 2.0, 3.0]))
+  j = put(j, "o", putn(obj(), "k", 1.0))
+  return j
+}

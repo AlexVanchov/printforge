@@ -1,0 +1,422 @@
+# fmath — pure floating-point math for PrintForge.
+#
+# Solemn deliberately ships no math builtins (an `extern fn` to libm would
+# carry the `ffi` effect and could never appear in a pure, example-verified
+# function). Everything the geometry core needs — floor/round, Float -> Int,
+# sqrt, the trig family, fixed-point formatting — is implemented here as pure
+# Solemn so every caller stays pure and `solemn check` verifies it.
+
+fn pi() -> Float {
+  example near(pi(), 3.141592653589793, 0.000000000000001)
+
+  return 3.141592653589793
+}
+
+fn deg2rad(d: Float) -> Float {
+  example near(deg2rad(180.0), 3.141592653589793, 0.000000000001)
+
+  return d * 3.141592653589793 / 180.0
+}
+
+fn rad2deg(r: Float) -> Float {
+  example near(rad2deg(3.141592653589793), 180.0, 0.000000001)
+
+  return r * 180.0 / 3.141592653589793
+}
+
+fn absf(x: Float) -> Float {
+  ensures result >= 0.0
+  example absf(-2.5) == 2.5
+  example absf(3.0) == 3.0
+
+  if x < 0.0 {
+    return 0.0 - x
+  }
+  return x
+}
+
+fn minf(a: Float, b: Float) -> Float {
+  example minf(1.0, 2.0) == 1.0
+  example minf(5.0, -2.0) == -2.0
+
+  if a < b {
+    return a
+  }
+  return b
+}
+
+fn maxf(a: Float, b: Float) -> Float {
+  example maxf(1.0, 2.0) == 2.0
+  example maxf(5.0, -2.0) == 5.0
+
+  if a > b {
+    return a
+  }
+  return b
+}
+
+fn clampf(x: Float, lo: Float, hi: Float) -> Float {
+  requires lo <= hi
+  ensures result >= lo and result <= hi
+  example clampf(5.0, 0.0, 3.0) == 3.0
+  example clampf(-1.0, 0.0, 3.0) == 0.0
+  example clampf(1.5, 0.0, 3.0) == 1.5
+
+  if x < lo {
+    return lo
+  }
+  if x > hi {
+    return hi
+  }
+  return x
+}
+
+fn mini(a: Int, b: Int) -> Int {
+  example mini(3, 4) == 3
+
+  if a < b {
+    return a
+  }
+  return b
+}
+
+fn maxi(a: Int, b: Int) -> Int {
+  example maxi(3, 4) == 4
+
+  if a > b {
+    return a
+  }
+  return b
+}
+
+# True when |a - b| <= eps — the comparison every Float example uses.
+fn near(a: Float, b: Float, eps: Float) -> Bool {
+  example near(1.0, 1.0000001, 0.001)
+  example not near(1.0, 1.1, 0.001)
+
+  let d: Float = a - b
+  if d < 0.0 {
+    return 0.0 - d <= eps
+  }
+  return d <= eps
+}
+
+# Largest integral Float <= x (C fmod gives the fractional part with the sign
+# of x, so negative non-integers step down by one).
+fn floorf(x: Float) -> Float {
+  example floorf(2.7) == 2.0
+  example floorf(-2.2) == -3.0
+  example floorf(-3.0) == -3.0
+  example floorf(0.0) == 0.0
+
+  let frac: Float = x % 1.0
+  if frac == 0.0 {
+    return x
+  }
+  if x < 0.0 {
+    return x - frac - 1.0
+  }
+  return x - frac
+}
+
+fn ceilf(x: Float) -> Float {
+  example ceilf(2.1) == 3.0
+  example ceilf(-2.7) == -2.0
+  example ceilf(4.0) == 4.0
+
+  let f: Float = floorf(x)
+  if f == x {
+    return x
+  }
+  return f + 1.0
+}
+
+# Round half away from zero.
+fn roundf(x: Float) -> Float {
+  example roundf(2.5) == 3.0
+  example roundf(2.4) == 2.0
+  example roundf(-2.5) == -3.0
+  example roundf(-0.4) == 0.0
+
+  if x < 0.0 {
+    return 0.0 - floorf(0.0 - x + 0.5)
+  }
+  return floorf(x + 0.5)
+}
+
+# Round to the nearest multiple of step (step > 0).
+fn snap(x: Float, step: Float) -> Float {
+  requires step > 0.0
+  example snap(12.34, 0.5) == 12.5
+  example snap(7.0, 5.0) == 5.0
+
+  return roundf(x / step) * step
+}
+
+# Float -> Int, truncating toward zero. Solemn has no such builtin, so the
+# integer part is rebuilt bit by bit (53 steps cover every exactly
+# representable integer magnitude).
+fn trunc_int(x: Float) -> Int {
+  requires absf(x) < 4503599627370496.0
+  example trunc_int(42.9) == 42
+  example trunc_int(-42.9) == -42
+  example trunc_int(0.2) == 0
+  example trunc_int(1234567.0) == 1234567
+
+  let v: Float = floorf(absf(x))
+  var n: Int = 0
+  var p: Int = 2251799813685248
+  var pf: Float = 2251799813685248.0
+  while p >= 1 {
+    if to_float(n) + pf <= v {
+      n = n + p
+    }
+    p = p / 2
+    pf = pf / 2.0
+  }
+  if x < 0.0 {
+    return 0 - n
+  }
+  return n
+}
+
+fn round_int(x: Float) -> Int {
+  example round_int(2.5) == 3
+  example round_int(-1.6) == -2
+
+  return trunc_int(roundf(x))
+}
+
+fn sqrtf(x: Float) -> Float {
+  requires x >= 0.0
+  example sqrtf(0.0) == 0.0
+  example near(sqrtf(2.0), 1.4142135623730951, 0.000000000000001)
+  example near(sqrtf(144.0), 12.0, 0.000000000001)
+  example near(sqrtf(0.0001), 0.01, 0.000000000000001)
+  example near(sqrtf(1000000.0), 1000.0, 0.0000000001)
+
+  if x == 0.0 {
+    return 0.0
+  }
+  var s: Float = x
+  var f: Float = 1.0
+  while s > 4.0 {
+    s = s / 4.0
+    f = f * 2.0
+  }
+  while s < 0.25 {
+    s = s * 4.0
+    f = f / 2.0
+  }
+  var y: Float = (s + 1.0) / 2.0
+  var i: Int = 0
+  while i < 8 {
+    y = (y + s / y) / 2.0
+    i = i + 1
+  }
+  return y * f
+}
+
+fn sin_poly(r: Float) -> Float {
+  let r2: Float = r * r
+  var term: Float = r
+  var sum: Float = r
+  var k: Float = 1.0
+  while k < 18.0 {
+    term = (0.0 - term) * r2 / ((k + 1.0) * (k + 2.0))
+    sum = sum + term
+    k = k + 2.0
+  }
+  return sum
+}
+
+fn cos_poly(r: Float) -> Float {
+  let r2: Float = r * r
+  var term: Float = 1.0
+  var sum: Float = 1.0
+  var k: Float = 0.0
+  while k < 18.0 {
+    term = (0.0 - term) * r2 / ((k + 1.0) * (k + 2.0))
+    sum = sum + term
+    k = k + 2.0
+  }
+  return sum
+}
+
+# sin/cos by reduction to [-pi/4, pi/4] plus quadrant, then Taylor series.
+fn sinf(x: Float) -> Float {
+  example near(sinf(0.0), 0.0, 0.000000000000001)
+  example near(sinf(pi() / 2.0), 1.0, 0.000000000000001)
+  example near(sinf(pi() / 6.0), 0.5, 0.000000000000001)
+  example near(sinf(-pi() / 6.0), -0.5, 0.000000000000001)
+  example near(sinf(100.0), -0.5063656411097588, 0.00000000001)
+
+  let half_pi: Float = 1.5707963267948966
+  let k: Float = roundf(x / half_pi)
+  let r: Float = x - k * half_pi
+  var q: Float = k % 4.0
+  if q < 0.0 {
+    q = q + 4.0
+  }
+  if q == 0.0 {
+    return sin_poly(r)
+  }
+  if q == 1.0 {
+    return cos_poly(r)
+  }
+  if q == 2.0 {
+    return 0.0 - sin_poly(r)
+  }
+  return 0.0 - cos_poly(r)
+}
+
+fn cosf(x: Float) -> Float {
+  example near(cosf(0.0), 1.0, 0.000000000000001)
+  example near(cosf(pi()), -1.0, 0.000000000000001)
+  example near(cosf(pi() / 3.0), 0.5, 0.000000000000001)
+
+  return sinf(x + 1.5707963267948966)
+}
+
+fn tanf(x: Float) -> Float {
+  example near(tanf(pi() / 4.0), 1.0, 0.000000000001)
+
+  return sinf(x) / cosf(x)
+}
+
+fn atan_small(x: Float) -> Float {
+  let x2: Float = x * x
+  var term: Float = x
+  var sum: Float = x
+  var k: Float = 1.0
+  while k < 30.0 {
+    term = (0.0 - term) * x2
+    sum = sum + term / (k + 2.0)
+    k = k + 2.0
+  }
+  return sum
+}
+
+fn atanf(x: Float) -> Float {
+  example near(atanf(1.0), pi() / 4.0, 0.000000000000001)
+  example near(atanf(-1.0), 0.0 - pi() / 4.0, 0.000000000000001)
+  example near(atanf(1000.0), 1.5697963271282298, 0.000000000001)
+  example atanf(0.0) == 0.0
+
+  if x < 0.0 {
+    return 0.0 - atanf(0.0 - x)
+  }
+  if x > 1.0 {
+    return 1.5707963267948966 - atanf(1.0 / x)
+  }
+  # halve the angle until the series converges fast
+  var y: Float = x
+  var mult: Float = 1.0
+  while y > 0.1 {
+    y = y / (1.0 + sqrtf(1.0 + y * y))
+    mult = mult * 2.0
+  }
+  return mult * atan_small(y)
+}
+
+fn atan2f(y: Float, x: Float) -> Float {
+  example near(atan2f(1.0, 1.0), pi() / 4.0, 0.000000000000001)
+  example near(atan2f(1.0, -1.0), 3.0 * pi() / 4.0, 0.000000000000001)
+  example near(atan2f(-1.0, -1.0), -3.0 * pi() / 4.0, 0.000000000000001)
+  example near(atan2f(1.0, 0.0), pi() / 2.0, 0.000000000000001)
+  example atan2f(0.0, 0.0) == 0.0
+
+  if x > 0.0 {
+    return atanf(y / x)
+  }
+  if x < 0.0 {
+    if y >= 0.0 {
+      return atanf(y / x) + 3.141592653589793
+    }
+    return atanf(y / x) - 3.141592653589793
+  }
+  if y > 0.0 {
+    return 1.5707963267948966
+  }
+  if y < 0.0 {
+    return -1.5707963267948966
+  }
+  return 0.0
+}
+
+fn acosf(x: Float) -> Float {
+  requires x >= -1.0 and x <= 1.0
+  example near(acosf(0.5), pi() / 3.0, 0.000000000000001)
+  example near(acosf(-1.0), pi(), 0.000000000000001)
+  example acosf(1.0) == 0.0
+
+  return atan2f(sqrtf(1.0 - x * x), x)
+}
+
+fn pow10i(n: Int) -> Int {
+  requires n >= 0 and n <= 18
+  example pow10i(0) == 1
+  example pow10i(3) == 1000
+
+  var r: Int = 1
+  var i: Int = 0
+  while i < n {
+    r = r * 10
+    i = i + 1
+  }
+  return r
+}
+
+fn zero_pad(t: Text, width: Int) -> Text {
+  example zero_pad("5", 3) == "005"
+  example zero_pad("123", 2) == "123"
+
+  var out: Text = t
+  var n: Int = len(t)
+  while n < width {
+    out = "0" + out
+    n = n + 1
+  }
+  return out
+}
+
+# Fixed-point rendering with at most `decimals` digits, trailing zeros and a
+# negative zero removed: the one number format of STL/OBJ files and labels.
+fn fmt(x: Float, decimals: Int) -> Text {
+  requires decimals >= 0 and decimals <= 9
+  example fmt(12.5, 4) == "12.5"
+  example fmt(3.0, 2) == "3"
+  example fmt(-0.00004, 4) == "0"
+  example fmt(-1.23456, 3) == "-1.235"
+  example fmt(0.1 + 0.2, 4) == "0.3"
+  example fmt(1234.5678, 0) == "1235"
+  example fmt(0.05, 1) == "0.1"
+
+  let scale: Int = pow10i(decimals)
+  let v: Int = round_int(absf(x) * to_float(scale))
+  if v == 0 {
+    return "0"
+  }
+  let ip: Int = v / scale
+  var frac: Int = v % scale
+  var digits: Int = decimals
+  while digits > 0 and frac % 10 == 0 {
+    frac = frac / 10
+    digits = digits - 1
+  }
+  var sign: Text = ""
+  if x < 0.0 {
+    sign = "-"
+  }
+  if digits == 0 {
+    return sign + to_text(ip)
+  }
+  return sign + to_text(ip) + "." + zero_pad(to_text(frac), digits)
+}
+
+# A Float rendered with up to 2 decimals (UI labels).
+fn fmt2(x: Float) -> Text {
+  example fmt2(2.0 / 3.0) == "0.67"
+
+  return fmt(x, 2)
+}

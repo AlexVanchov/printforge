@@ -1,0 +1,157 @@
+# sizing — the exact-size math behind "make it exactly 50 mm wide".
+#
+# A model's printed size is its bounding box on the bed. These pure
+# functions turn a requested size into scale factors (uniform when the
+# proportions lock is on), fit models to the printer bed, and spot models
+# that were exported in the wrong unit (the most common reason a downloaded
+# STL shows up as a speck or a skyscraper).
+
+import "fmath.slm"
+import "jsonx.slm"
+
+type V3 = { x: Float, y: Float, z: Float }
+
+type Fit = { factor: Float, rotate: Bool }
+
+type Guess = { unit: Text, factor: Float, sure: Bool, message: Text }
+
+fn v3(x: Float, y: Float, z: Float) -> V3 {
+  return V3 { x: x, y: y, z: z }
+}
+
+fn axis(v: V3, a: Int) -> Float {
+  requires a >= 0 and a <= 2
+  example axis(v3(1.0, 2.0, 3.0), 1) == 2.0
+
+  if a == 0 {
+    return v.x
+  }
+  if a == 1 {
+    return v.y
+  }
+  return v.z
+}
+
+# Scale factors that make axis `a` exactly `target` mm. With the lock on all
+# three axes scale together; with it off only that axis changes.
+fn resize(cur: V3, a: Int, target: Float, lock: Bool) -> V3 {
+  requires a >= 0 and a <= 2
+  requires target > 0.0
+  example resize(v3(10.0, 20.0, 40.0), 2, 80.0, true) == v3(2.0, 2.0, 2.0)
+  example resize(v3(10.0, 20.0, 40.0), 0, 25.0, false) == v3(2.5, 1.0, 1.0)
+  example resize(v3(0.0, 20.0, 40.0), 0, 25.0, true) == v3(1.0, 1.0, 1.0)
+
+  let c: Float = axis(cur, a)
+  if c <= 0.0 {
+    return v3(1.0, 1.0, 1.0)
+  }
+  let f: Float = target / c
+  if lock {
+    return v3(f, f, f)
+  }
+  if a == 0 {
+    return v3(f, 1.0, 1.0)
+  }
+  if a == 1 {
+    return v3(1.0, f, 1.0)
+  }
+  return v3(1.0, 1.0, f)
+}
+
+# The new size after applying factors — what the panel shows next.
+fn apply(cur: V3, f: V3) -> V3 {
+  example apply(v3(10.0, 20.0, 40.0), v3(2.0, 2.0, 2.0)) == v3(20.0, 40.0, 80.0)
+
+  return v3(cur.x * f.x, cur.y * f.y, cur.z * f.z)
+}
+
+# Largest uniform factor (capped at 1.0 unless grow is set) that fits the
+# model on a bed of (bx, by, bz) leaving `margin` mm free around it. Turning
+# the model 90 degrees on the bed is considered when that lets it fit larger.
+fn fit_bed(dims: V3, bed: V3, margin: Float, grow: Bool) -> Fit {
+  requires margin >= 0.0
+  example fit_bed(v3(100.0, 50.0, 20.0), v3(220.0, 220.0, 250.0), 5.0, false) == Fit { factor: 1.0, rotate: false }
+  example fit_bed(v3(300.0, 100.0, 20.0), v3(250.0, 210.0, 220.0), 5.0, false) == Fit { factor: 0.8, rotate: false }
+  example fit_bed(v3(100.0, 240.0, 20.0), v3(250.0, 210.0, 220.0), 5.0, false) == Fit { factor: 1.0, rotate: true }
+  example fit_bed(v3(10.0, 10.0, 10.0), v3(220.0, 220.0, 250.0), 10.0, true) == Fit { factor: 20.0, rotate: false }
+
+  if dims.x <= 0.0 or dims.y <= 0.0 or dims.z <= 0.0 {
+    return Fit { factor: 1.0, rotate: false }
+  }
+  let ux: Float = fmath.maxf(bed.x - 2.0 * margin, 1.0)
+  let uy: Float = fmath.maxf(bed.y - 2.0 * margin, 1.0)
+  let fz: Float = bed.z / dims.z
+  let straight: Float = fmath.minf(fmath.minf(ux / dims.x, uy / dims.y), fz)
+  let turned: Float = fmath.minf(fmath.minf(ux / dims.y, uy / dims.x), fz)
+  var best: Float = straight
+  var rot: Bool = false
+  if turned > straight * 1.0001 {
+    best = turned
+    rot = true
+  }
+  if not grow and best >= 1.0 {
+    return Fit { factor: 1.0, rotate: rot and straight < 1.0 }
+  }
+  return Fit { factor: fmath.floorf(best * 1000.0) / 1000.0, rotate: rot }
+}
+
+fn fits(dims: V3, bed: V3) -> Bool {
+  example fits(v3(100.0, 100.0, 100.0), v3(220.0, 220.0, 250.0))
+  example not fits(v3(230.0, 100.0, 100.0), v3(220.0, 220.0, 250.0))
+
+  return dims.x <= bed.x and dims.y <= bed.y and dims.z <= bed.z
+}
+
+# STL files carry no unit. Guess from the overall size whether a freshly
+# imported model was drawn in metres or inches instead of millimetres.
+fn guess_unit(dims: V3) -> Guess {
+  example guess_unit(v3(40.0, 30.0, 20.0)).unit == "mm"
+  example guess_unit(v3(0.05, 0.03, 0.02)).unit == "m"
+  example guess_unit(v3(2.0, 1.5, 0.5)).unit == "in"
+  example guess_unit(v3(2.0, 1.5, 0.5)).sure
+  example guess_unit(v3(6.0, 4.0, 1.0)).unit == "in"
+  example not guess_unit(v3(6.0, 4.0, 1.0)).sure
+  example guess_unit(v3(9000.0, 4000.0, 100.0)).unit == "um"
+
+  let big: Float = fmath.maxf(dims.x, fmath.maxf(dims.y, dims.z))
+  if big <= 0.0 {
+    return Guess { unit: "mm", factor: 1.0, sure: true, message: "" }
+  }
+  if big < 0.6 {
+    return Guess { unit: "m", factor: 1000.0, sure: true, message: "This model is tiny (" + fmath.fmt(big, 3) + " mm). It was probably made in metres. Convert it to millimetres?" }
+  }
+  if big < 3.0 {
+    return Guess { unit: "in", factor: 25.4, sure: true, message: "This model is only " + fmath.fmt(big, 2) + " mm across. It was probably made in inches. Convert it?" }
+  }
+  if big < 10.0 {
+    return Guess { unit: "in", factor: 25.4, sure: false, message: "This model is quite small (" + fmath.fmt(big, 1) + " mm). If it was made in inches, convert it." }
+  }
+  if big > 3000.0 {
+    return Guess { unit: "um", factor: 0.001, sure: false, message: "This model is huge (" + fmath.fmt(big / 1000.0, 1) + " m). It may be in micrometres. Shrink it?" }
+  }
+  return Guess { unit: "mm", factor: 1.0, sure: true, message: "" }
+}
+
+fn v3_of(j: Json, key: Text) -> V3 {
+  let xs: List[Json] = jsonx.items(j, key)
+  return v3(jsonx.num_at(xs, 0, 0.0), jsonx.num_at(xs, 1, 0.0), jsonx.num_at(xs, 2, 0.0))
+}
+
+fn v3_json(v: V3) -> Json {
+  example json_render(v3_json(v3(1.0, 2.0, 3.0))) == "[1.0,2.0,3.0]"
+
+  return jsonx.nums([v.x, v.y, v.z])
+}
+
+fn guess_json(g: Guess) -> Json {
+  var j: Json = jsonx.obj()
+  j = jsonx.putt(j, "unit", g.unit)
+  j = jsonx.putn(j, "factor", g.factor)
+  j = jsonx.putb(j, "sure", g.sure)
+  j = jsonx.putt(j, "message", g.message)
+  return j
+}
+
+fn fit_json(f: Fit) -> Json {
+  return jsonx.putb(jsonx.putn(jsonx.obj(), "factor", f.factor), "rotate", f.rotate)
+}

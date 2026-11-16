@@ -1,0 +1,278 @@
+# bridge — the one typed handler behind window.solemn.call(name, args).
+#
+# The page never touches the disk or does print-readiness maths itself: it
+# names an operation and passes Json; this handler dispatches to the pure,
+# example-verified modules (parts, units, sizing, analysis, meshio) or to the
+# small effectful shell (files). Every reply is an object with "ok": true,
+# or "ok": false plus a sentence in "error" the page can show as-is.
+
+import "analysis.slm"
+import "files.slm"
+import "jsonx.slm"
+import "meshio.slm"
+import "parts.slm"
+import "printers.slm"
+import "sizing.slm"
+import "textutil.slm"
+import "units.slm"
+
+fn version() -> Text {
+  return "1.0.0"
+}
+
+fn catalog() -> Json {
+  example len(jsonx.items(catalog(), "parts")) == 25
+  example len(jsonx.items(catalog(), "printers")) == 19
+
+  let pm: Json = printers.catalog_json()
+  var j: Json = jsonx.obj()
+  j = jsonx.put(j, "printers", JList(jsonx.items(pm, "printers")))
+  j = jsonx.put(j, "materials", JList(jsonx.items(pm, "materials")))
+  j = jsonx.put(j, "parts", JList(jsonx.items(parts.catalog_json(), "parts")))
+  return j
+}
+
+fn parse_units(args: Json) -> Json {
+  example jsonx.num(parse_units(jsonx.putt(jsonx.putt(jsonx.obj(), "text", "1in"), "unit", "mm")), "mm", 0.0) == 25.4
+  example not jsonx.boolean(parse_units(jsonx.putt(jsonx.obj(), "text", "x")), "ok", true)
+
+  match units.parse_length(jsonx.text(args, "text", ""), jsonx.text(args, "unit", "mm")) {
+    Ok(v) -> {
+      return jsonx.ok(jsonx.putn(jsonx.obj(), "mm", v))
+    }
+    Err(e) -> {
+      return jsonx.fail(e)
+    }
+  }
+}
+
+fn resize(args: Json) -> Json {
+  example json_render(resize(jsonx.putb(jsonx.putn(jsonx.putn(jsonx.put(jsonx.obj(), "cur", jsonx.nums([10.0, 20.0, 40.0])), "axis", 2.0), "target", 80.0), "lock", true))) == "{\"factors\":[2.0,2.0,2.0],\"ok\":true}"
+
+  let a: Int = fmath_axis(jsonx.num(args, "axis", 0.0))
+  let target: Float = jsonx.num(args, "target", 0.0)
+  if target <= 0.0 {
+    return jsonx.fail("Sizes must be bigger than zero.")
+  }
+  let f: sizing.V3 = sizing.resize(sizing.v3_of(args, "cur"), a, target, jsonx.boolean(args, "lock", true))
+  return jsonx.ok(jsonx.put(jsonx.obj(), "factors", sizing.v3_json(f)))
+}
+
+fn fmath_axis(x: Float) -> Int {
+  example fmath_axis(2.0) == 2
+  example fmath_axis(9.0) == 0
+
+  if x > 1.5 and x < 2.5 {
+    return 2
+  }
+  if x > 0.5 and x < 1.5 {
+    return 1
+  }
+  return 0
+}
+
+fn fit(args: Json) -> Json {
+  let pr: printers.Printer = printers.printer(jsonx.text(args, "printer", ""))
+  let f: sizing.Fit = sizing.fit_bed(sizing.v3_of(args, "dims"), sizing.v3(pr.bx, pr.by, pr.bz), jsonx.num(args, "margin", 5.0), jsonx.boolean(args, "grow", false))
+  return jsonx.ok(sizing.fit_json(f))
+}
+
+fn analyze(args: Json) -> Json {
+  let st: analysis.Settings = analysis.settings_of(jsonx.obj_or_empty(args, "settings"))
+  let pieces: Int = fmath_count(jsonx.num(args, "pieces", 1.0))
+  return analysis.analyze(jsonx.items(args, "tri"), jsonx.text(args, "printer", ""), jsonx.text(args, "material", ""), st, jsonx.boolean(args, "watertight", true), pieces)
+}
+
+fn fmath_count(x: Float) -> Int {
+  var n: Int = 0
+  while to_float(n) + 0.5 < x and n < 100000 {
+    n = n + 1
+  }
+  return n
+}
+
+fn export_mesh(args: Json) -> Json uses env, fs, ffi {
+  let name: Text = jsonx.text(args, "name", "")
+  if not textutil.valid_file_name(name) {
+    return jsonx.fail("Please choose a file name without slashes or a leading dot.")
+  }
+  let dir: Text = jsonx.text(args, "dir", "")
+  if not files.is_dir(dir) {
+    return jsonx.fail("The folder does not exist any more. Choose another one.")
+  }
+  let tri: List[Json] = jsonx.items(args, "tri")
+  if len(tri) < 9 {
+    return jsonx.fail("There is nothing to export yet. Add a shape first.")
+  }
+  let fmt: Text = jsonx.text(args, "format", "stl")
+  if fmt == "obj" {
+    return files.write_text(files.join(dir, name + ".obj"), meshio.encode_obj("PrintForge", tri))
+  }
+  return files.write_text(files.join(dir, name + ".stl"), meshio.encode_stl("PrintForge", tri))
+}
+
+fn import_file(args: Json) -> Json uses fs {
+  let path: Text = jsonx.text(args, "path", "")
+  match read_file_bytes(path) {
+    Ok(b) -> {
+      if textutil.ends_with_ci(path, ".stl") {
+        match meshio.decode_stl(b) {
+          Ok(d) -> {
+            let dims: sizing.V3 = sizing.v3(d.b.x1 - d.b.x0, d.b.y1 - d.b.y0, d.b.z1 - d.b.z0)
+            var j: Json = jsonx.obj()
+            j = jsonx.putt(j, "kind", "soup")
+            j = jsonx.putt(j, "format", d.kind)
+            j = jsonx.putn(j, "tris", to_float(d.tris))
+            j = jsonx.putt(j, "data", d.data)
+            j = jsonx.putn(j, "scale", 0.0001)
+            j = jsonx.put(j, "dims", sizing.v3_json(dims))
+            j = jsonx.put(j, "guess", sizing.guess_json(sizing.guess_unit(dims)))
+            return jsonx.ok(j)
+          }
+          Err(e) -> {
+            return jsonx.fail(e)
+          }
+        }
+      }
+      if textutil.ends_with_ci(path, ".obj") or textutil.ends_with_ci(path, ".3mf") {
+        return jsonx.ok(jsonx.putt(jsonx.putt(jsonx.obj(), "kind", "base64"), "data", textutil.base64(b)))
+      }
+      return jsonx.fail("PrintForge can open STL, OBJ and 3MF files.")
+    }
+    Err(e) -> {
+      return jsonx.fail(files.friendly_fs_error(e))
+    }
+  }
+}
+
+fn guess(args: Json) -> Json {
+  return jsonx.ok(sizing.guess_json(sizing.guess_unit(sizing.v3_of(args, "dims"))))
+}
+
+fn init() -> Json uses env, fs, ffi {
+  var j: Json = jsonx.obj()
+  j = jsonx.putt(j, "version", version())
+  j = jsonx.put(j, "settings", files.load_settings())
+  j = jsonx.put(j, "catalog", catalog())
+  j = jsonx.put(j, "places", files.places())
+  var plat: Text = "linux"
+  if files.is_mac() {
+    plat = "mac"
+  }
+  j = jsonx.putt(j, "platform", plat)
+  var selftest: Bool = false
+  match env_var("PRINTFORGE_SELFTEST") {
+    Some(v) -> {
+      selftest = v == "1"
+    }
+    None -> {
+      selftest = false
+    }
+  }
+  j = jsonx.putb(j, "selftest", selftest)
+  match env_var("PRINTFORGE_SELFTEST_DIR") {
+    Some(d) -> {
+      j = jsonx.putt(j, "selftest_dir", d)
+    }
+    None -> {
+      j = jsonx.putt(j, "selftest_dir", "")
+    }
+  }
+  return jsonx.ok(j)
+}
+
+fn test_log(args: Json) -> Json uses env, fs {
+  match env_var("PRINTFORGE_SELFTEST_LOG") {
+    Some(p) -> {
+      match append_file(p, jsonx.text(args, "text", "") + "\n") {
+        Ok(u) -> {
+          return jsonx.ok(jsonx.obj())
+        }
+        Err(e) -> {
+          return jsonx.fail(e)
+        }
+      }
+    }
+    None -> {
+      return jsonx.ok(jsonx.obj())
+    }
+  }
+}
+
+fn handle(name: Text, args: Json) -> Json uses env, fs, ffi {
+  if name == "app.init" {
+    return init()
+  }
+  if name == "part.build" {
+    return parts.build_json(jsonx.text(args, "id", ""), jsonx.obj_or_empty(args, "values"))
+  }
+  if name == "units.parse" {
+    return parse_units(args)
+  }
+  if name == "sizing.resize" {
+    return resize(args)
+  }
+  if name == "sizing.fit" {
+    return fit(args)
+  }
+  if name == "sizing.guess" {
+    return guess(args)
+  }
+  if name == "analyze" {
+    return analyze(args)
+  }
+  if name == "export" {
+    return export_mesh(args)
+  }
+  if name == "import.read" {
+    return import_file(args)
+  }
+  if name == "settings.save" {
+    match files.save_settings(jsonx.obj_or_empty(args, "settings")) {
+      Ok(u) -> {
+        return jsonx.ok(jsonx.obj())
+      }
+      Err(e) -> {
+        return jsonx.fail(files.friendly_fs_error(e))
+      }
+    }
+  }
+  if name == "fs.list" {
+    return files.listing(jsonx.text(args, "dir", files.home()), jsonx.items(args, "exts"))
+  }
+  if name == "fs.places" {
+    return jsonx.ok(files.places())
+  }
+  if name == "fs.exists" {
+    return jsonx.ok(jsonx.putb(jsonx.obj(), "exists", files.exists(jsonx.text(args, "path", ""))))
+  }
+  if name == "project.save" {
+    return files.save_project(jsonx.text(args, "path", ""), jsonx.obj_or_empty(args, "doc"))
+  }
+  if name == "project.load" {
+    return files.load_project(jsonx.text(args, "path", ""))
+  }
+  if name == "os.open" {
+    return files.os_open(jsonx.text(args, "path", ""), jsonx.boolean(args, "reveal", false))
+  }
+  if name == "os.open_with" {
+    return files.open_with(jsonx.text(args, "app", ""), jsonx.text(args, "path", ""))
+  }
+  if name == "autosave.save" {
+    return files.autosave_save(jsonx.obj_or_empty(args, "doc"))
+  }
+  if name == "autosave.load" {
+    return files.autosave_load()
+  }
+  if name == "autosave.clear" {
+    return files.autosave_clear()
+  }
+  if name == "test.log" {
+    return test_log(args)
+  }
+  if name == "app.quit" {
+    exit(fmath_count(jsonx.num(args, "code", 0.0)))
+    return jsonx.ok(jsonx.obj())
+  }
+  return jsonx.fail("Unknown operation: " + name)
+}
